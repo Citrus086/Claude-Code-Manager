@@ -757,3 +757,10 @@ ocean/forest/rose 归入 Legacy 组。Header 顶栏导航重构为 AppShell（�
 - **准确性/稳定性实测**：两条链路的原生 resume 都正确记住 nonce 且 thread id 不变；同一 app-server PID 并发 3 turn 全部答对且 thread 隔离；两个并发 task 注入不同 git env，shell 输出各自正确、无串值；真实 Shell 事件的 command/output/exit_code 映射正确；强杀空闲 app-server 后自动换 PID并成功完成下一 turn。
 - **完整 CCM 链路**：用真实 Codex 跑 `InstanceManager → parser → SQLite → WebSocket → 状态收尾` 两轮，PID 复用、session 不变、最终消息各只落库一次、delta 为 live-only 零落库，task=completed / instance=idle；首轮/续聊 WebSocket 首 delta 为 2.819s / 1.736s。
 - **可复现与回归**：新增 `scripts/benchmark_codex_transport.py`（手动运行，真实消耗额度）和 3 个回归测试，锁定并发事件不串线、共享进程退出解除全部 waiter、delta 广播但不落库。后端全量 1108 passed；最新 main 上 Codex 相关 210 passed；前端 production build 与 Codex delta 专项测试通过。ChatView 全文件另有 2 个由 7454a5a 改 `scrollIntoView` 为 `container.scrollTo` 后未同步断言的既有失败；全仓 ESLint 也有 66 个既有错误，不归入本性能修复。
+
+### 2026-07-19 — 消息 LaTeX 统一渲染（commit a37ec29）
+
+- **问题**：Chat、Loop、共享任务和 Discussion 的六个 Markdown 入口只启用了 GFM，模型常见的 `$...$`、`$$...$$`、`\(...\)`、`\[...\]` 会原样显示；各入口分散配置也容易继续漂移。
+- **修复**：新增共享 `MarkdownRenderer`，用 `remark-math-extended` + `rehype-katex` 统一转换并随 bundle 加载 KaTeX 字体；display 公式在窄屏横向滚动。slash 分隔符始终走 micromark 的 Markdown 语境 tokenizer，避免全局替换误伤代码块、链接或流式未闭合内容；额外修复行首同行 `\[x\]` 吞后文、同行 `$$x$$` 被当 inline、常见 `$5 or $10` 货币对误判三个边界。
+- **验证**：新 renderer 专项 12/12、连同 Loop 20/20，TypeScript、定向 ESLint、production build 均通过；前端全量为 32 failed / 259 passed，失败集合与修改前基线完全一致（PoolDrawer/AppShell mock 缺 `getCodexPoolStatus` 30 项 + ChatView 过期 scroll 断言 2 项）。后端未改，更新前后全量均为 3 failed / 1110 passed（monitor 测试未显式指定 claude provider 的既有基线问题）。
+- **部署提醒**：KaTeX CSS 引用的 59 个字体文件必须随完整 `frontend/dist` 一起发布，不能只替换 JS/CSS；纯前端静态资源更新本身无需重启后端。
