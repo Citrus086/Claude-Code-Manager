@@ -1,9 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../../api/client';
 import type { SharedTaskReceived } from '../../api/client';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { ArrowLeft, Send, RefreshCw, Wifi, WifiOff, Loader2 } from '../icons';
+import { MarkdownRenderer } from '../MarkdownRenderer';
 
 interface SharedChatViewProps {
   shared: SharedTaskReceived;
@@ -285,9 +284,7 @@ function MessageRow({ msg }: { msg: ChatMsg }) {
     return (
       <div className="max-w-[90%]">
         <div className="bg-gray-800 border border-gray-700 rounded-xl px-4 py-2">
-          <div className="markdown-body text-sm">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
-          </div>
+          <MarkdownRenderer className="text-sm">{msg.content}</MarkdownRenderer>
         </div>
       </div>
     );

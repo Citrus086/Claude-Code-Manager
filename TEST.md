@@ -784,6 +784,21 @@ uv run python -m pytest backend/tests/test_api_tasks.py -k broadcasts_status_cha
 |----------|----------|------|
 | `frontend/src/components/Chat/ChatView.test.tsx` | `copies a user message without its sender prefix` | 用户消息保留 `[发送者]` 的界面显示，但复制时只写入消息正文 |
 
+## Markdown / LaTeX 消息渲染
+
+```bash
+cd frontend && npx vitest run src/components/MarkdownRenderer.test.tsx
+```
+
+| 测试文件 | 覆盖内容 |
+|----------|----------|
+| `frontend/src/components/MarkdownRenderer.test.tsx` | `$...$` / `$$...$$` 行内与块级 KaTeX（含同行 display）、TeX 反斜杠保真、普通货币对不误解析 |
+| 同上 | `\(...\)` / `\[...\]` 模型分隔符原生解析，同一行 display、列表/段落续行语境正确 |
+| 同上 | inline/fenced code、blockquote 内代码、链接、未闭合分隔符、双反斜杠 literal 不误解析 |
+| 同上 | 转义货币与 GFM 共存、display math 不走代码块 renderer、所有消息界面只能经共享 `MarkdownRenderer` 接入 |
+
+手动验证：分别在 Chat、Loop、共享任务与 Discussion 输出长块公式，确认公式排版正常、窄屏可横向滚动；复制原消息时仍保留原始 LaTeX 文本。
+
 ## 开发规范
 
 ### Claude Code 开发时必须遵守：

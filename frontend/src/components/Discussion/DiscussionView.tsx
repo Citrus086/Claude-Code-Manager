@@ -1,6 +1,4 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { api } from '../../api/client';
 import type {
   DiscussionDetail,
@@ -23,6 +21,7 @@ import {
   Clock,
   UserPlus,
 } from '../icons';
+import { MarkdownRenderer } from '../MarkdownRenderer';
 import { QuickPhraseDropdown } from '../QuickPhrases/QuickPhraseDropdown';
 
 const AGENT_COLORS = [
@@ -431,9 +430,9 @@ export function DiscussionView({ discussionId, onBack, onDeleted }: DiscussionVi
               {msg.role !== 'user' && msg.agent_role_name && (
                 <div className="text-xs text-emerald-400 font-medium mb-1">{msg.agent_role_name}</div>
               )}
-              <div className="text-sm prose prose-sm max-w-none prose-invert">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
-              </div>
+              <MarkdownRenderer className="text-sm prose prose-sm max-w-none prose-invert">
+                {msg.content}
+              </MarkdownRenderer>
             </div>
           </div>
         ))}
@@ -726,9 +725,9 @@ function ActivityItem({ event }: { event: DiscussionEventItem }) {
 function EventItem({ event }: { event: DiscussionEventItem }) {
   if (event.event_type === 'message' || event.event_type === 'result') {
     return (
-      <div className="text-sm prose prose-sm max-w-none prose-invert overflow-x-auto break-words">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{event.content || ''}</ReactMarkdown>
-      </div>
+      <MarkdownRenderer className="text-sm prose prose-sm max-w-none prose-invert overflow-x-auto break-words">
+        {event.content || ''}
+      </MarkdownRenderer>
     );
   }
 

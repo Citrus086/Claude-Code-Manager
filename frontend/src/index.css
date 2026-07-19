@@ -825,6 +825,14 @@ html[data-theme='rose'] {
   font-style: italic;
 }
 
+/* KaTeX display formulas can be wider than a chat bubble on mobile. */
+.markdown-body .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.2em 0;
+}
+
 /* 抽屉 / 遮罩入场动画 */
 @keyframes ccm-slide-in-left {
   from { transform: translateX(-100%); }
