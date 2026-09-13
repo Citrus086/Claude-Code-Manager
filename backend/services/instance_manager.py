@@ -15,7 +15,7 @@ import time
 import weakref
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Sequence
 
@@ -229,6 +229,8 @@ DEFAULT_CONSUMER_CANCEL_TIMEOUT = 5.0
 TERMINAL_TASK_OPERATION_LOCK_POLL_SECONDS = 0.05
 PTY_BACKGROUND_POLL_SECONDS = 5.0
 PTY_BACKGROUND_MAX_SECONDS = 4 * 60 * 60
+PTY_FOREGROUND_ACTIVITY_POLL_SECONDS = 1.0
+PTY_FOREGROUND_ACTIVITY_PUBLISH_SECONDS = 5.0
 PTY_POST_EXIT_CHAT_GRACE_SECONDS = 30.0
 # Keep the absolute chat-proof lease aligned with the maximum native
 # background-work lifetime.  The watcher still retires a proof much sooner
@@ -1134,6 +1136,11 @@ class InstanceManager:
         # event pumps separate from the terminal consumer so stop/reap can
         # still address the original process identity.
         self._pty_followup_tasks: dict[int, set[asyncio.Task]] = {}
+        # Claude's interactive JSONL records only complete events. Observe the
+        # already-drained TUI byte timestamp separately so the chat can show
+        # liveness during a long incomplete response without exposing terminal
+        # contents or treating those bytes as stable assistant text.
+        self._pty_foreground_activity_tasks: set[asyncio.Task] = set()
         # The API may allocate a provisional follow-up id from the durable
         # retained-background marker before the Session route is inspected.
         # Keep the exact route selected under the lifecycle lock so a race
@@ -2349,6 +2356,112 @@ class InstanceManager:
             if delayed_cancellation is not None:
                 raise delayed_cancellation
 
+    async def _watch_pty_foreground_activity(
+        self,
+        instance_id: int,
+        process: object,
+        consumer: asyncio.Task,
+        record: _OutputConsumerRecord,
+    ) -> None:
+        """Publish transient liveness while an exact Claude PTY turn runs."""
+
+        if record.provider != "claude":
+            return
+        native_process = None
+        last_output = 0.0
+        last_published = 0.0
+        pending_activity = False
+        while True:
+            if (
+                consumer.done()
+                or self.processes.get(instance_id) is not process
+                or self._tasks.get(instance_id) is not consumer
+                or self._consumer_records.get(instance_id) is not record
+            ):
+                return
+
+            session = getattr(process, "session", None)
+            current_native_process = getattr(session, "_process", None)
+            if current_native_process is not native_process:
+                native_process = current_native_process
+                last_output = 0.0
+                pending_activity = False
+
+            observed_output = getattr(native_process, "_last_output", 0.0)
+            if (
+                isinstance(observed_output, (int, float))
+                and observed_output > last_output
+            ):
+                last_output = float(observed_output)
+                pending_activity = True
+
+            now = time.monotonic()
+            if (
+                pending_activity
+                and record.task_id is not None
+                and record.task_retry_count is not None
+                and record.task_turn_generation is not None
+                and (
+                    last_published == 0.0
+                    or now - last_published
+                    >= PTY_FOREGROUND_ACTIVITY_PUBLISH_SECONDS
+                )
+            ):
+                payload = {
+                    "event_type": "provider_activity",
+                    "task_id": record.task_id,
+                    "task_retry_count": record.task_retry_count,
+                    "task_turn_generation": record.task_turn_generation,
+                    "provider": "claude",
+                    "activity_source": "pty_output",
+                    "last_activity_at": datetime.fromtimestamp(
+                        time.time() - max(0.0, now - last_output), UTC
+                    ).isoformat().replace("+00:00", "Z"),
+                }
+                try:
+                    await self.broadcaster.broadcast(
+                        f"task:{record.task_id}", payload
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to publish Claude PTY activity for task %s",
+                        record.task_id,
+                    )
+                else:
+                    last_published = now
+                    pending_activity = False
+
+            done, _ = await asyncio.wait(
+                {consumer}, timeout=PTY_FOREGROUND_ACTIVITY_POLL_SECONDS
+            )
+            if done:
+                return
+
+    def _start_pty_foreground_activity_watcher(
+        self,
+        instance_id: int,
+        process: object,
+        consumer: asyncio.Task,
+        record: _OutputConsumerRecord,
+    ) -> None:
+        watcher = asyncio.create_task(
+            self._watch_pty_foreground_activity(
+                instance_id, process, consumer, record
+            ),
+            name=f"pty-foreground-activity-{instance_id}",
+        )
+        self._pty_foreground_activity_tasks.add(watcher)
+        watcher.add_done_callback(self._pty_foreground_activity_tasks.discard)
+
+    async def _cancel_pty_foreground_activity_tasks(self) -> None:
+        pending = tuple(self._pty_foreground_activity_tasks)
+        for watcher in pending:
+            if not watcher.done():
+                watcher.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._pty_foreground_activity_tasks.difference_update(pending)
+
     async def inject_pty_message(
         self,
         session_id: str,
@@ -3184,6 +3297,7 @@ class InstanceManager:
         )
 
         async def cancel_followups_and_shutdown() -> None:
+            await self._cancel_pty_foreground_activity_tasks()
             await self._cancel_pty_followup_tasks()
             await backend.shutdown()
 
@@ -9029,6 +9143,13 @@ class InstanceManager:
             metadata_barrier.set()
             if self._pty_launch_barriers.get(instance_id) is metadata_barrier:
                 self._pty_launch_barriers.pop(instance_id, None)
+            if consumer_record is not None and consumer is not None:
+                self._start_pty_foreground_activity_watcher(
+                    instance_id,
+                    process,
+                    consumer,
+                    consumer_record,
+                )
             return pid
         except BaseException:
             process = self.processes.get(instance_id)

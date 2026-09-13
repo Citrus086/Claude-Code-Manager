@@ -168,6 +168,15 @@ function formatBackgroundSilence(milliseconds: number): string {
   return remainder ? `${hours} 小时 ${remainder} 分钟前` : `${hours} 小时前`;
 }
 
+function formatProviderActivityAge(milliseconds: number): string {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  if (seconds < 5) return 'now';
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  return `${Math.floor(minutes / 60)}h ago`;
+}
+
 function workspaceReviewGoalFromToolInput(rawInput: unknown): string | null {
   if (typeof rawInput !== 'string' || !rawInput.trim()) return null;
   try {
@@ -651,6 +660,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, onTaskForked, 
   // prop 变化时清掉覆盖（见下方 effect），否则错过一次 WS 事件就永久陈旧。
   const [localStatus, setLocalStatus] = useState<string | null>(null);
   const [localBackgroundActive, setLocalBackgroundActive] = useState<boolean | null>(null);
+  const [providerActivityAt, setProviderActivityAt] = useState<number | null>(null);
   // 最近一次 WS status_change 时刻：在途旧轮询快照返回（prop 回退旧值）时
   // 不能击穿刚到的 WS 状态——否则终态 effect 会误触发 autoDequeue，把排队
   // 消息在 turn 进行中提前发出。超过一个轮询周期没有 WS 事件才允许清除。
@@ -677,6 +687,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, onTaskForked, 
     setStillRunning(false);
     setLocalStatus(null);
     setLocalBackgroundActive(null);
+    setProviderActivityAt(null);
     lastWsStatusAt.current = 0;
     lastWsBackgroundAt.current = 0;
     setPtyFollowupBoundaryEpoch((epoch) => epoch + 1);
@@ -1322,6 +1333,16 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, onTaskForked, 
   );
   const backgroundOnly = backgroundActive && !foregroundActive;
   const hasActiveWork = foregroundActive || backgroundActive;
+  const [, refreshProviderActivityAge] = useState(0);
+  useVisibilityAwareInterval(
+    () => refreshProviderActivityAge((generation) => generation + 1),
+    5_000,
+    foregroundActive && providerActivityAt !== null,
+    false,
+  );
+  const providerActivityAge = providerActivityAt === null
+    ? null
+    : Math.max(0, Date.now() - providerActivityAt);
   // Starting a new turn must not reuse the previous turn's terminal lifecycle
   // as an optimistic status. Running descendants remain visible throughout.
   const lifecycleTimestamp = rawBackgroundLifecycle
@@ -1818,6 +1839,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, onTaskForked, 
       resetPtyFollowupTracking();
       activeTaskTurnRef.current = incoming;
       setSending(false);
+      setProviderActivityAt(null);
       setSuppressedCompletedLifecycleTurn(null);
       setTerminalReconciliationPending(false);
     }
@@ -1881,6 +1903,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, onTaskForked, 
           frontendReviewGoalActiveRef.current = false;
           setFrontendReviewGoalLocallyActive(false);
           setFrontendReviewGoalStart(null);
+          setProviderActivityAt(null);
         }
       }
       if (
@@ -1928,6 +1951,18 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, onTaskForked, 
     if (msg.channel !== `task:${task.id}` || !msg.data) return;
 
     const eventType = msg.data.event_type as string || (msg.data.event as string);
+    if (eventType === 'provider_activity') {
+      const identity = eventTaskTurnIdentity(msg.data, task.id);
+      if (
+        !identity
+        || observeTaskTurn(identity) < 0
+        || msg.data.provider !== 'claude'
+        || msg.data.activity_source !== 'pty_output'
+      ) return;
+      const timestamp = Date.parse(String(msg.data.last_activity_at || ''));
+      setProviderActivityAt(Number.isFinite(timestamp) ? timestamp : Date.now());
+      return;
+    }
     if (eventType === 'pty_background_followup_boundary') {
       const identity = eventTaskTurnIdentity(msg.data, task.id);
       if (!identity || observeTaskTurn(identity) < 0) return;
@@ -2260,6 +2295,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, onTaskForked, 
         retainedFollowupTurnRef.current = null;
         setSending(false);
         setStillRunning(false);
+        setProviderActivityAt(null);
         // Keep an already observed terminal status sticky. A late process_exit
         // must not revive stale `task.status=executing` props and bring the
         // Goal/thinking indicator back after completion.
@@ -4359,6 +4395,8 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, onTaskForked, 
               <span>Waiting for requested capability...</span>
             ) : terminalReconciliationPending ? (
               <span>正在确认任务状态...</span>
+            ) : task.provider === 'claude' && providerActivityAge !== null ? (
+              <span>Claude is running... · PTY active {formatProviderActivityAge(providerActivityAge)}</span>
             ) : (
               <span>{providerLabel} is thinking...</span>
             )}

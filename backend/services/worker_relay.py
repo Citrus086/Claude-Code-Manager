@@ -2399,6 +2399,7 @@ EXACT_GENERATION_RELAY_EVENT_TYPES = frozenset({
     "goal_evaluation",
     "message_delta",
     "thinking_delta",
+    "provider_activity",
     "monitor_session_created",
     "monitor_check",
     "monitor_session_status",

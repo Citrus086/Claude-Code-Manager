@@ -20574,6 +20574,67 @@ def test_pty_backend_disabled_by_default():
 
 
 @pytest.mark.asyncio
+async def test_pty_foreground_activity_publishes_transient_exact_turn_heartbeat(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "backend.services.instance_manager.PTY_FOREGROUND_ACTIVITY_POLL_SECONDS",
+        0.005,
+    )
+    monkeypatch.setattr(
+        "backend.services.instance_manager.PTY_FOREGROUND_ACTIVITY_PUBLISH_SECONDS",
+        0.005,
+    )
+    broadcaster = MagicMock(broadcast=AsyncMock())
+    manager = InstanceManager(MagicMock(), broadcaster)
+    native_process = types.SimpleNamespace(_last_output=time.monotonic())
+    process = types.SimpleNamespace(
+        session=types.SimpleNamespace(_process=native_process)
+    )
+    consumer = asyncio.create_task(asyncio.Event().wait())
+    record = _OutputConsumerRecord(
+        process=process,
+        task=consumer,
+        chat_initiated=True,
+        provider="claude",
+        task_id=397,
+        task_retry_count=2,
+        task_turn_generation=11,
+    )
+    manager.processes[7] = process
+    manager._tasks[7] = consumer
+    manager._consumer_records[7] = record
+
+    manager._start_pty_foreground_activity_watcher(
+        7, process, consumer, record
+    )
+    for _ in range(20):
+        if broadcaster.broadcast.await_count:
+            break
+        await asyncio.sleep(0.005)
+
+    broadcaster.broadcast.assert_awaited_once()
+    channel, payload = broadcaster.broadcast.await_args.args
+    assert channel == "task:397"
+    assert payload == {
+        "event_type": "provider_activity",
+        "task_id": 397,
+        "task_retry_count": 2,
+        "task_turn_generation": 11,
+        "provider": "claude",
+        "activity_source": "pty_output",
+        "last_activity_at": payload["last_activity_at"],
+    }
+    assert payload["last_activity_at"].endswith("Z")
+    assert "content" not in payload
+
+    consumer.cancel()
+    await asyncio.gather(consumer, return_exceptions=True)
+    await manager._cancel_pty_foreground_activity_tasks()
+    assert manager._pty_foreground_activity_tasks == set()
+
+
+@pytest.mark.asyncio
 async def test_launch_delegates_to_pty_backend_for_claude():
     im = InstanceManager(_FakeDBFactory(), MagicMock())
     calls = {}

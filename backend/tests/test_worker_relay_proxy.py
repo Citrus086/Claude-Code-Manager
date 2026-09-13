@@ -6235,6 +6235,15 @@ async def test_relay_context_usage_syncs(relay, session_factory):
         ("context_usage", "event_type", {"input_tokens": 999}),
         ("message_delta", "event_type", {"content": "stale"}),
         ("thinking_delta", "event_type", {"content": "stale"}),
+        (
+            "provider_activity",
+            "event_type",
+            {
+                "provider": "claude",
+                "activity_source": "pty_output",
+                "last_activity_at": "2026-09-13T12:00:00Z",
+            },
+        ),
         ("loop_iteration_end", "event", {"progress": "9/9"}),
         ("goal_evaluation", "event_type", {"turn": 9, "reason": "stale"}),
         (

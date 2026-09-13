@@ -1230,6 +1230,106 @@ describe('ChatView', () => {
       },
     );
 
+    it('shows live PTY activity for the exact Claude turn', () => {
+      const task = makeTask({
+        id: 305,
+        provider: 'claude',
+        status: 'executing',
+        retry_count: 2,
+        turn_generation: 7,
+      });
+      render(
+        <ChatView
+          task={task}
+          projects={projects}
+          onBack={onBack}
+        />,
+      );
+
+      act(() => {
+        capturedOnMessage?.({
+          channel: 'task:305',
+          data: {
+            event_type: 'provider_activity',
+            task_id: 305,
+            task_retry_count: 2,
+            task_turn_generation: 7,
+            provider: 'claude',
+            activity_source: 'pty_output',
+            last_activity_at: new Date().toISOString(),
+          },
+        });
+      });
+
+      expect(screen.getByText('Claude is running... · PTY active now'))
+        .toBeInTheDocument();
+      expect(screen.queryByText('Claude is thinking...')).not.toBeInTheDocument();
+    });
+
+    it('ignores stale PTY activity and clears it when a newer turn arrives', () => {
+      const task = makeTask({
+        id: 306,
+        provider: 'claude',
+        status: 'executing',
+        retry_count: 2,
+        turn_generation: 7,
+      });
+      render(
+        <ChatView
+          task={task}
+          projects={projects}
+          onBack={onBack}
+        />,
+      );
+
+      act(() => {
+        capturedOnMessage?.({
+          channel: 'task:306',
+          data: {
+            event_type: 'provider_activity',
+            task_id: 306,
+            task_retry_count: 2,
+            task_turn_generation: 6,
+            provider: 'claude',
+            activity_source: 'pty_output',
+            last_activity_at: new Date().toISOString(),
+          },
+        });
+      });
+      expect(screen.getByText('Claude is thinking...')).toBeInTheDocument();
+
+      act(() => {
+        capturedOnMessage?.({
+          channel: 'task:306',
+          data: {
+            event_type: 'provider_activity',
+            task_id: 306,
+            task_retry_count: 2,
+            task_turn_generation: 7,
+            provider: 'claude',
+            activity_source: 'pty_output',
+            last_activity_at: new Date().toISOString(),
+          },
+        });
+      });
+      expect(screen.getByText('Claude is running... · PTY active now'))
+        .toBeInTheDocument();
+
+      act(() => {
+        capturedOnMessage?.({
+          channel: 'tasks',
+          data: {
+            event: 'status_change',
+            task_id: 306,
+            task_retry_count: 2,
+            task_turn_generation: 8,
+            new_status: 'executing',
+          },
+        });
+      });
+      expect(screen.getByText('Claude is thinking...')).toBeInTheDocument();
+    });
+
     it('queues follow-ups and disables live injection while waiting on a capability', async () => {
       const task = makeTask({
         id: 303,
