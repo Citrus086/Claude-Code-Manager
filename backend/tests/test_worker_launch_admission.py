@@ -66,6 +66,32 @@ def _system_principal() -> dict[str, object]:
     )
 
 
+def test_worker_context_proof_accepts_exact_upstream_http_400():
+    message = (
+        "API Error: 400 upstream returned HTTP 400 "
+        "(request id: abc) (request id: def)"
+    )
+    proof = build_codex_context_preflight_relay_proof(
+        {
+            "type": "turn.failed",
+            "error": {"message": message},
+        },
+        {
+            "event_type": "system_event",
+            "role": None,
+            "content": message,
+            "is_error": True,
+        },
+        retry_count=0,
+        turn_generation=4,
+        source_log_id=704,
+        actual_transport="codex_app_server",
+    )
+
+    assert proof is not None
+    assert proof["codex_error_info"] == "UpstreamHttp400Context"
+
+
 def test_worker_deployment_token_is_not_a_runtime_principal(monkeypatch):
     from backend.api.deps import task_execution_principal_from_request
 

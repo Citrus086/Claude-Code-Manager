@@ -4808,7 +4808,7 @@ class WorkerRelay:
             and terminal.is_error is True
             and terminal_proof["raw_type"] == "turn.failed"
             and terminal_proof.get("codex_error_info")
-            == "ContextWindowExceeded"
+            in {"ContextWindowExceeded", "UpstreamHttp400Context"}
             and isinstance(content, str)
             and terminal_proof.get("message_sha256")
             == hashlib.sha256(content.encode("utf-8")).hexdigest()

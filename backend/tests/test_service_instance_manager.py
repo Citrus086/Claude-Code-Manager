@@ -23652,8 +23652,21 @@ async def test_claude_prompt_too_long_compacts_and_requeues(db_factory):
 
 
 @pytest.mark.asyncio
-async def test_claude_pty_prompt_too_long_turn_duration_compacts_and_requeues(
+@pytest.mark.parametrize(
+    "api_error_text",
+    [
+        "Prompt is too long",
+        (
+            "API Error: 400 upstream returned HTTP 400 "
+            "(request id: 202609140132318396298608268d9d6Y5npViE4) "
+            "(request id: 20260914013212163478308268d9d690QoKDW9)"
+        ),
+    ],
+    ids=("prompt-too-long", "upstream-http-400"),
+)
+async def test_claude_pty_context_error_turn_duration_compacts_and_requeues(
     db_factory,
+    api_error_text,
 ):
     """The real claude-pty API-error/turn-duration pair is replay-safe."""
 
@@ -23708,16 +23721,25 @@ async def test_claude_pty_prompt_too_long_turn_duration_compacts_and_requeues(
                 turn_scope="foreground",
                 event_type="message",
                 role="assistant",
-                content="Prompt is too long",
+                content=api_error_text,
                 raw_json=json.dumps({
                     "type": "assistant",
                     "isApiErrorMessage": True,
-                    "error": "invalid_request",
+                    "error": (
+                        "invalid_request"
+                        if api_error_text == "Prompt is too long"
+                        else "unknown"
+                    ),
+                    **(
+                        {"apiErrorStatus": 400}
+                        if api_error_text != "Prompt is too long"
+                        else {}
+                    ),
                     "message": {
                         "role": "assistant",
                         "content": [{
                             "type": "text",
-                            "text": "Prompt is too long",
+                            "text": api_error_text,
                         }],
                         "usage": {
                             "input_tokens": 0,

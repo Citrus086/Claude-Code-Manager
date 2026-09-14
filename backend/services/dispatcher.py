@@ -49,6 +49,7 @@ from backend.services.context_compaction import (
     build_compacted_task_retry_prompt,
     context_compact_threshold_with_headroom,
     context_tokens_used,
+    is_upstream_http_400_context_error,
     recoverable_chat_context_failure,
 )
 from backend.services.context_snapshot import capture_context_recovery_snapshot
@@ -9768,6 +9769,13 @@ class GlobalDispatcher:
             error_message = (
                 error.get("message") if isinstance(error, dict) else None
             )
+            is_context_window_error = (
+                isinstance(error_code, str)
+                and error_code.strip().lower() == "contextwindowexceeded"
+            )
+            is_upstream_http_400 = is_upstream_http_400_context_error(
+                error_message
+            )
             if not (
                 terminal.event_type == "system_event"
                 and terminal.role is None
@@ -9776,8 +9784,7 @@ class GlobalDispatcher:
                 and terminal_raw.get("type") == "turn.failed"
                 and isinstance(error_message, str)
                 and terminal.content == error_message
-                and isinstance(error_code, str)
-                and error_code.strip().lower() == "contextwindowexceeded"
+                and (is_context_window_error or is_upstream_http_400)
             ):
                 return None
 

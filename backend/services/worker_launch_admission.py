@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from weakref import WeakKeyDictionary
 
 from backend.config import settings
+from backend.services.context_compaction import is_upstream_http_400_context_error
 from backend.services.task_creation import task_execution_principal_values
 
 
@@ -250,18 +251,26 @@ def build_codex_context_preflight_relay_proof(
         error.get("codexErrorInfo") if isinstance(error, dict) else None
     )
     error_message = error.get("message") if isinstance(error, dict) else None
+    is_context_window_error = (
+        isinstance(error_code, str)
+        and error_code.strip().lower() == "contextwindowexceeded"
+    )
+    is_upstream_http_400 = is_upstream_http_400_context_error(error_message)
     if not (
         event.get("event_type") == "system_event"
         and event.get("role") is None
         and event.get("is_error") is True
         and isinstance(error_message, str)
         and event.get("content") == error_message
-        and isinstance(error_code, str)
-        and error_code.strip().lower() == "contextwindowexceeded"
+        and (is_context_window_error or is_upstream_http_400)
     ):
         return None
     common.update(
-        codex_error_info="ContextWindowExceeded",
+        codex_error_info=(
+            "ContextWindowExceeded"
+            if is_context_window_error
+            else "UpstreamHttp400Context"
+        ),
         message_sha256=hashlib.sha256(
             error_message.encode("utf-8")
         ).hexdigest(),
@@ -310,7 +319,8 @@ def parse_codex_context_preflight_relay_proof(
     ):
         return None
     if raw_type == "turn.failed" and not (
-        payload.get("codex_error_info") == "ContextWindowExceeded"
+        payload.get("codex_error_info")
+        in {"ContextWindowExceeded", "UpstreamHttp400Context"}
         and _valid_hex(payload.get("message_sha256"), 64)
     ):
         return None

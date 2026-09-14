@@ -12,6 +12,7 @@ from backend.services.context_compaction import (
     context_compact_threshold_with_headroom,
     context_tokens_used,
     is_context_window_exceeded,
+    is_upstream_http_400_context_error,
     read_codex_rollout_last_usage,
     recoverable_chat_context_failure,
 )
@@ -69,6 +70,24 @@ def test_context_limit_classifier_keeps_benign_window_metadata_out():
         {"modelContextWindow": 258_400, "message": "turn completed"},
     )
     assert not is_context_window_exceeded("codex", "usage limit exceeded")
+
+
+def test_upstream_http_400_context_error_requires_exact_gateway_shape():
+    message = (
+        "API Error: 400 upstream returned HTTP 400 "
+        "(request id: 202609140132318396298608268d9d6Y5npViE4) "
+        "(request id: 20260914013212163478308268d9d690QoKDW9)"
+    )
+    assert is_upstream_http_400_context_error(message)
+    assert is_context_window_exceeded("claude", message)
+    assert is_context_window_exceeded("codex", {"message": message})
+
+    assert not is_upstream_http_400_context_error(
+        "API Error: 400 invalid_request (request id: abc)"
+    )
+    assert not is_upstream_http_400_context_error(
+        message + " extra provider details"
+    )
 
 
 def test_codex_context_tokens_use_protocol_value_with_safe_legacy_fallback():
@@ -231,6 +250,86 @@ async def test_recoverable_chat_failure_accepts_exact_claude_api_error(
 
 
 @pytest.mark.asyncio
+async def test_recoverable_chat_failure_accepts_claude_upstream_http_400(
+    db_factory,
+):
+    task_id = await _failed_task(db_factory)
+    content = (
+        "API Error: 400 upstream returned HTTP 400 "
+        "(request id: 202609140132318396298608268d9d6Y5npViE4) "
+        "(request id: 20260914013212163478308268d9d690QoKDW9)"
+    )
+    async with db_factory() as db:
+        db.add(
+            LogEntry(
+                task_id=task_id,
+                task_retry_count=2,
+                task_turn_generation=7,
+                turn_scope="foreground",
+                event_type="message",
+                role="assistant",
+                content=content,
+                raw_json=json.dumps(
+                    {
+                        "type": "assistant",
+                        "isApiErrorMessage": True,
+                        "error": "invalid_request",
+                    }
+                ),
+                is_error=True,
+            )
+        )
+        await db.commit()
+        task = await db.get(Task, task_id)
+
+        assert (
+            await recoverable_chat_context_failure(db, task)
+            == "prompt_too_long"
+        )
+
+
+@pytest.mark.asyncio
+async def test_recoverable_chat_failure_accepts_claude_result_upstream_http_400(
+    db_factory,
+):
+    task_id = await _failed_task(db_factory)
+    content = (
+        "API Error: 400 upstream returned HTTP 400 "
+        "(request id: abc) (request id: def)"
+    )
+    async with db_factory() as db:
+        db.add(
+            LogEntry(
+                task_id=task_id,
+                task_retry_count=2,
+                task_turn_generation=7,
+                turn_scope="foreground",
+                event_type="result",
+                role="assistant",
+                content=content,
+                raw_json=json.dumps(
+                    {
+                        "type": "result",
+                        "is_error": True,
+                        "result": content,
+                        "terminal_reason": "blocking_limit",
+                        "duration_api_ms": 0,
+                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                    }
+                ),
+                is_error=True,
+            )
+        )
+        await db.commit()
+        task = await db.get(Task, task_id)
+
+        assert (
+            await recoverable_chat_context_failure(db, task)
+            == "prompt_too_long"
+        )
+
+
+@pytest.mark.asyncio
 async def test_recoverable_chat_failure_accepts_claude_usage_metadata(
     db_factory,
 ):
@@ -312,6 +411,30 @@ async def test_recoverable_chat_failure_accepts_claude_usage_metadata(
                         "error": {
                             "message": "request failed",
                             "codexErrorInfo": "contextWindowExceeded",
+                        },
+                    }
+                ),
+                "is_error": True,
+            },
+            "context_window_exceeded",
+        ),
+        (
+            "codex",
+            {
+                "event_type": "system_event",
+                "role": None,
+                "content": (
+                    "API Error: 400 upstream returned HTTP 400 "
+                    "(request id: abc) (request id: def)"
+                ),
+                "raw_json": json.dumps(
+                    {
+                        "type": "turn.failed",
+                        "error": {
+                            "message": (
+                                "API Error: 400 upstream returned HTTP 400 "
+                                "(request id: abc) (request id: def)"
+                            )
                         },
                     }
                 ),

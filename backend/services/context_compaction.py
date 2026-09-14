@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,12 @@ _CONTEXT_LIMIT_MARKERS = (
     "maximum context window",
     "too many tokens for the model",
     "input is too long for the requested model",
+)
+
+_UPSTREAM_HTTP_400_CONTEXT_RE = re.compile(
+    r"^api\s+error:\s*400\s+upstream\s+returned\s+http\s+400"
+    r"(?:\s+\(request\s+id:\s*[^()\r\n]+\))+\s*$",
+    re.IGNORECASE,
 )
 
 # A completed-turn usage event is necessarily stale by the time the next
@@ -113,6 +120,19 @@ def _is_response_timeout_marker(value: Any) -> bool:
         return False
 
 
+def is_upstream_http_400_context_error(value: Any) -> bool:
+    """Recognize the gateway's exact 400 rejection used for context overflow.
+
+    The gateway does not preserve Codex's ``ContextWindowExceeded`` code and
+    Claude's CLI renders this as a plain assistant API-error message. Keep the
+    match narrow because other HTTP 400 responses are not safe to replay.
+    """
+
+    return isinstance(value, str) and bool(
+        _UPSTREAM_HTTP_400_CONTEXT_RE.fullmatch(value.strip())
+    )
+
+
 async def recoverable_chat_context_failure(db: Any, task: Any) -> str | None:
     """Return a strict context-failure proof for an exact failed chat turn.
 
@@ -180,18 +200,33 @@ async def recoverable_chat_context_failure(db: Any, task: Any) -> str | None:
             ):
                 candidate = "prompt_too_long"
             if (
+                row.event_type == "message"
+                and row.role == "assistant"
+                and row.is_error is True
+                and isinstance(raw, dict)
+                and raw.get("type") == "assistant"
+                and raw.get("isApiErrorMessage") is True
+                and is_upstream_http_400_context_error(content)
+            ):
+                # A gateway may replace Claude's structured context error with
+                # this exact API-error text while retaining the envelope.
+                candidate = "prompt_too_long"
+            if (
                 row.event_type == "result"
                 and row.is_error is True
                 and isinstance(raw, dict)
                 and raw.get("type") == "result"
                 and raw.get("is_error") is True
                 and raw.get("terminal_reason") == "blocking_limit"
-                and "prompt is too long"
-                in str(raw.get("result") or content).lower()
                 and raw.get("duration_api_ms") == 0
                 and _canonical_zero_usage(raw.get("usage"))
             ):
-                candidate = "prompt_too_long"
+                result_text = str(raw.get("result") or content).strip()
+                if (
+                    "prompt is too long" in result_text.lower()
+                    or is_upstream_http_400_context_error(result_text)
+                ):
+                    candidate = "prompt_too_long"
             # The PTY idle timeout is an exact CCM-generated terminal marker;
             # retain the native session as a compaction source but never resume
             # it after the timeout.
@@ -212,6 +247,15 @@ async def recoverable_chat_context_failure(db: Any, task: Any) -> str | None:
                 and isinstance(error, dict)
                 and str(error.get("codexErrorInfo") or "").lower()
                 == "contextwindowexceeded"
+            ):
+                candidate = "context_window_exceeded"
+            if (
+                row.event_type == "system_event"
+                and row.is_error is True
+                and isinstance(raw, dict)
+                and raw.get("type") == "turn.failed"
+                and isinstance(error, dict)
+                and is_upstream_http_400_context_error(error.get("message"))
             ):
                 candidate = "context_window_exceeded"
         if candidate is not None:
@@ -309,7 +353,11 @@ def is_context_window_exceeded(provider: str | None, *details: Any) -> bool:
         for fragment in _text_fragments(detail)
         if fragment.strip()
     )
-    return any(marker in text for marker in _CONTEXT_LIMIT_MARKERS)
+    return any(marker in text for marker in _CONTEXT_LIMIT_MARKERS) or any(
+        is_upstream_http_400_context_error(fragment)
+        for detail in details
+        for fragment in _text_fragments(detail)
+    )
 
 
 def context_tokens_used(provider: str | None, usage: Mapping[str, Any]) -> int:
