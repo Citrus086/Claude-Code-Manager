@@ -449,6 +449,17 @@ describe('TaskList', () => {
       await waitFor(() => expect(onRefresh).toHaveBeenCalled());
     });
 
+    it('does not label a PTY-only marker as Background when no sub-agent is active', () => {
+      const tasks = [makeTask({
+        status: 'completed',
+        background_active: true,
+        active_sub_agents: 0,
+      })];
+      render(<TaskList tasks={tasks} projects={projects} onRefresh={onRefresh} onOpenChat={onOpenChat} />);
+
+      expect(screen.queryByText('Background')).not.toBeInTheDocument();
+    });
+
     it.each(['failed', 'cancelled', 'conflict', 'completed'])(
       'shows Retry in overflow menu for %s tasks',
       async (status) => {

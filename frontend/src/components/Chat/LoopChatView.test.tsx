@@ -599,6 +599,30 @@ describe('LoopChatView', () => {
       });
     });
 
+    it('does not show a PTY-only background hint when no sub-agent is active', async () => {
+      vi.mocked(api.getTaskChatHistory).mockResolvedValue([
+        makeMsg({ id: 11, content: 'Foreground loop reply' }),
+      ]);
+
+      render(
+        <LoopChatView
+          task={makeTask({
+            status: 'completed',
+            background_active: true,
+            active_sub_agents: 0,
+          })}
+          onBack={onBack}
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Foreground loop reply')).toBeInTheDocument();
+        expect(screen.queryByText('Main loop response finished; background agents are still running'))
+          .not.toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /Cancel Loop/i })).toBeInTheDocument();
+      });
+    });
+
     it.each([
       {
         label: 'global tasks channel',

@@ -24,6 +24,7 @@ import { getTaskStatusLabel } from '../components/Tasks/taskStatus';
 import { isPRMonitorDisplayTask } from '../components/Tasks/prMonitorTask';
 import { PRMonitorTaskDetail } from '../components/Tasks/PRMonitorTaskDetail';
 import { PRMonitorTaskSummary } from '../components/Tasks/PRMonitorTaskSummary';
+import { taskHasVisibleBackground } from '../components/Tasks/taskBackground';
 
 const PAGE_SIZE = 20;
 
@@ -32,7 +33,7 @@ function isDeliveryOwnedTask(task: Task): boolean {
 }
 
 function taskStatusColorKey(task: Task): string {
-  if (task.background_active) return 'background';
+  if (taskHasVisibleBackground(task)) return 'background';
   if (isDeliveryOwnedTask(task)) {
     if (task.delivery_activity === 'running') return 'executing';
     if (task.delivery_activity === 'waiting') return 'delivery_waiting';

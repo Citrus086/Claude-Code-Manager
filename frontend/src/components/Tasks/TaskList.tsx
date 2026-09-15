@@ -19,6 +19,7 @@ import {
 } from './taskSharePermissions';
 import { isPRMonitorDisplayTask } from './prMonitorTask';
 import { PRMonitorTaskSummary } from './PRMonitorTaskSummary';
+import { taskHasVisibleBackground } from './taskBackground';
 
 export interface TaskListProps {
   tasks: Task[];
@@ -223,7 +224,7 @@ export function TaskList({ tasks, projects, onRefresh, onTaskUpdated, onOpenChat
           {/* Row 1: status dot + badges (left, wraps) | action buttons (right, no wrap) */}
           <div className="flex items-center gap-2">
             <span className={`w-2.5 h-2.5 rounded-full shrink-0 self-start mt-[9px] ${statusColors[
-              t.background_active
+              taskHasVisibleBackground(t)
                 ? 'background'
                 : t.mode === 'delivery_loop' && t.delivery_activity === 'running'
                   ? 'executing'

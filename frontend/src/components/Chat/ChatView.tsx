@@ -36,6 +36,7 @@ import {
 import { VersionedPlansDialog } from '../PlanReview/VersionedPlansDialog';
 import { planStalenessConfirmationMessage } from '../PlanReview/planStaleness';
 import { AttentionTag } from '../Tasks/AttentionTag';
+import { taskHasVisibleBackground } from '../Tasks/taskBackground';
 import { TaskSSHAccessBadge } from '../SSH/TaskSSHAccess';
 import { DeliveryRunPanel } from '../Tasks/DeliveryRunPanel';
 import { ExpandableText } from '../ExpandableText';
@@ -2904,6 +2905,23 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, onTaskForked, 
     () => monitorSessions.filter((s) => s.status === 'running').length,
     [monitorSessions]
   );
+  // ``background_active`` is a private PTY generation/lifecycle marker used
+  // for routing and cancellation.  Do not expose a PTY-only marker as a
+  // user-facing badge; only a confirmed sub-agent count or a native provider
+  // lifecycle is meaningful to the user.
+  const showBackgroundIndicator = (
+    backgroundLifecycle?.state === 'running'
+    || taskHasVisibleBackground({
+      active_sub_agents: (
+        typeof task.active_sub_agents === 'number'
+          ? Math.max(task.active_sub_agents, activeSubAgentCount)
+          : activeSubAgentCount > 0
+            ? activeSubAgentCount
+            : undefined
+      ),
+      background_active: localBackgroundActive ?? task.background_active,
+    })
+  );
   const workerManagedTask = task.is_worker_managed;
   const monitorSupported = task.provider !== 'codex' || (
     codexMainMcpEnabled === true
@@ -3685,7 +3703,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, onTaskForked, 
                   <FastModeBadge task={task} />
                 </>
               )}
-              {backgroundActive && (
+              {showBackgroundIndicator && (
                 <span className="text-xs bg-teal-600/25 text-teal-300 px-1.5 rounded font-medium whitespace-nowrap">
                   后台运行中
                 </span>
@@ -4335,7 +4353,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, onTaskForked, 
             />
           )
         )}
-        {backgroundActive && backgroundLifecycle && (() => {
+        {showBackgroundIndicator && backgroundLifecycle && (() => {
           if (backgroundLifecycle.state === 'completed') {
             return (
               <div className="mx-3 flex items-center gap-2 rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">
@@ -4375,7 +4393,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, onTaskForked, 
             </div>
           );
         })()}
-        {backgroundActive && !backgroundLifecycle && (
+        {showBackgroundIndicator && !backgroundLifecycle && (
           <div className="mx-3 flex items-center gap-2 rounded-lg border border-sky-500/25 bg-sky-500/10 px-3 py-2 text-sm text-sky-300">
             <Loader2 size={14} className="animate-spin" />
             <span>{foregroundActive ? '后台子 Agent 仍在运行' : '主回复已完成，后台仍在运行'}</span>

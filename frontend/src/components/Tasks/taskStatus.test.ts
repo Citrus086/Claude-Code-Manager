@@ -59,4 +59,22 @@ describe('getTaskStatusLabel Capability projection', () => {
       background_active: false,
     } as Task)).toBe('Waiting Capability');
   });
+
+  it('does not expose a PTY-only background marker when no sub-agent is active', () => {
+    expect(getTaskStatusLabel({
+      mode: 'auto',
+      status: 'completed',
+      background_active: true,
+      active_sub_agents: 0,
+    } as Task)).toBe('Completed');
+  });
+
+  it('keeps the background label when a sub-agent is confirmed active', () => {
+    expect(getTaskStatusLabel({
+      mode: 'auto',
+      status: 'completed',
+      background_active: true,
+      active_sub_agents: 1,
+    } as Task)).toBe('Background');
+  });
 });

@@ -11,6 +11,7 @@ import {
 import { TaskArtifactLink } from './TaskArtifactLink';
 import { remarkTaskArtifactPaths } from './taskArtifactMarkdown';
 import { MarkdownRenderer } from '../Markdown/MarkdownRenderer';
+import { taskHasVisibleBackground } from '../Tasks/taskBackground';
 
 interface LoopChatViewProps {
   task: Task;
@@ -455,6 +456,16 @@ export function LoopChatView({ task, onBack, inline }: LoopChatViewProps) {
     backgroundLifecycle?.state === 'running'
     || (localBackgroundActive ?? task.background_active === true)
   );
+  // A retained PTY generation is an internal routing fence, not a user-facing
+  // "background agents" state.  Loop lifecycle records are explicit native
+  // descendant evidence and remain visible.
+  const showBackgroundIndicator = (
+    backgroundLifecycle?.state === 'running'
+    || taskHasVisibleBackground({
+      background_active: localBackgroundActive ?? task.background_active,
+      active_sub_agents: task.active_sub_agents,
+    })
+  );
   const foregroundActive = (
     !backgroundActive
     && backgroundLifecycle === null
@@ -865,7 +876,7 @@ export function LoopChatView({ task, onBack, inline }: LoopChatViewProps) {
       {/* Footer */}
       {hasActiveWork && (
         <div className="border-t border-gray-800 bg-gray-900 p-3 flex flex-col items-center gap-2">
-          {backgroundActive && (
+          {showBackgroundIndicator && (
             <p className="text-xs text-sky-300">
               {foregroundActive
                 ? 'Background agents are still running'

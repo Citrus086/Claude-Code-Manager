@@ -1,4 +1,5 @@
 import type { Task } from '../../api/client';
+import { taskHasVisibleBackground } from './taskBackground';
 
 const ACTIVE_PLAN_STAGES = new Set(['planning', 'reviewing']);
 
@@ -9,7 +10,7 @@ function titleCaseStatus(status: string): string {
 }
 
 export function getTaskStatusLabel(task: Task): string {
-  if (task.background_active) return 'Background';
+  if (taskHasVisibleBackground(task)) return 'Background';
 
   if (task.status === 'waiting_capability') return 'Waiting Capability';
 

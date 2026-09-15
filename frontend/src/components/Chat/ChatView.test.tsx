@@ -1414,6 +1414,30 @@ describe('ChatView', () => {
       expect(screen.getByText('后台运行中')).toBeInTheDocument();
     });
 
+    it('does not show a PTY-only background badge when no sub-agent is active', () => {
+      const task = makeTask({
+        id: 38,
+        status: 'completed',
+        background_active: true,
+        active_sub_agents: 0,
+      });
+      render(<ChatView task={task} projects={projects} onBack={onBack} />);
+
+      expect(screen.queryByText('后台运行中')).not.toBeInTheDocument();
+    });
+
+    it('shows the background badge when an active sub-agent is confirmed', () => {
+      const task = makeTask({
+        id: 39,
+        status: 'completed',
+        background_active: true,
+        active_sub_agents: 1,
+      });
+      render(<ChatView task={task} projects={projects} onBack={onBack} />);
+
+      expect(screen.getByText('后台运行中')).toBeInTheDocument();
+    });
+
     it('consumes only matching strict-boolean global background events', () => {
       const task = makeTask({ id: 32, background_active: false });
       render(<ChatView task={task} projects={projects} onBack={onBack} />);
