@@ -4129,6 +4129,13 @@ class GlobalDispatcher:
                         t.id,
                         t.status,
                     )
+                if new_status in {"pending", "failed"}:
+                    # Once the exact runtime has been released or failed
+                    # closed, no retained PTY tail can still accept input.
+                    # Clear the durable routing marker in the same CAS so the
+                    # API cannot keep projecting background_active=True for a
+                    # dead Session that the frontend would try to inject into.
+                    values["pty_background_generation"] = None
                 release_predicates = [
                     Task.id == t.id,
                     Task.status == t.status,
