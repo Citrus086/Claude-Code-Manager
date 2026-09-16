@@ -517,6 +517,7 @@ SHUTDOWN_CONSUMER_CANCEL_TIMEOUT = 5
 TASK_QUEUE_ABORT_TIMEOUT = 15.0
 AUX_LIFECYCLE_CANCEL_TIMEOUT = 10.0
 DISPATCHER_BACKGROUND_STOP_TIMEOUT = 10.0
+STALE_STATE_RECONCILE_INTERVAL_SECONDS = 30.0
 SHUTDOWN_LIFECYCLE_CANCEL_TIMEOUT = 15.0
 PLAN_RUNTIME_RECOVERY_BACKOFF_INITIAL = 5.0
 PLAN_RUNTIME_RECOVERY_BACKOFF_MAX = 60.0
@@ -1179,6 +1180,7 @@ class GlobalDispatcher:
         # an idle slot; start() must either observe that spawned generation or
         # finish its stale-state snapshot before the turn can spawn.
         self._chat_launch_admission_lock = asyncio.Lock()
+        self._last_stale_state_reconcile = 0.0
         self._running = False
         self._shutting_down = False
         self._monitor_tasks: dict[
@@ -5680,6 +5682,21 @@ class GlobalDispatcher:
                     except asyncio.TimeoutError:
                         pass
                     continue
+                # A provider/PTY consumer can disappear without taking the
+                # normal terminal callback with it.  Startup reconciliation
+                # handles this after a restart, but leaving the same durable
+                # Task/monitor graph stranded until the next restart makes a
+                # dead turn look indefinitely executing.  Reuse the exact
+                # startup CAS reconciler while holding the launch barrier so
+                # this cannot cross a fresh admission.
+                now = time.monotonic()
+                if (
+                    now - self._last_stale_state_reconcile
+                    >= STALE_STATE_RECONCILE_INTERVAL_SECONDS
+                ):
+                    async with self._chat_launch_admission_lock:
+                        await self._cleanup_stale_state()
+                    self._last_stale_state_reconcile = now
                 # Keep orphan Plan cleanup and local Plan claim/lifecycle
                 # registration in this one producer. Do not move this into a
                 # detached timer task: the claim commit is intentionally

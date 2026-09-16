@@ -2175,6 +2175,29 @@ async def test_cleanup_called_on_start(db_factory):
     await d.stop()
 
 
+@pytest.mark.asyncio
+async def test_dispatch_loop_reconciles_stale_state_without_restart(db_factory):
+    """A dead PTY/monitor graph is reconciled while dispatch remains live."""
+
+    d = _make_dispatcher(db_factory)
+    d._running = True
+    d._last_stale_state_reconcile = 0.0
+    d._cleanup_stale_state = AsyncMock()
+    d._recover_due_versioned_plan_runs = AsyncMock()
+    d._ensure_min_idle_instances = AsyncMock()
+    d._dispatch_worker_plan_runs = AsyncMock()
+
+    async def stop_after_reconcile():
+        d._running = False
+        d.wake()
+
+    d._dispatch_worker_tasks = AsyncMock(side_effect=stop_after_reconcile)
+
+    await asyncio.wait_for(d._dispatch_loop(), timeout=1)
+
+    d._cleanup_stale_state.assert_awaited_once_with()
+
+
 # === _reset_instance_if_stale (safety net) tests ===
 
 
