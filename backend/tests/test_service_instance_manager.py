@@ -20219,8 +20219,12 @@ def test_build_command_claude_task_disables_interactive_plan_mode():
 
     idx = cmd.index("--disallowedTools")
     assert set(cmd[idx + 1].split(",")) == {
+        "CronCreate",
+        "CronDelete",
+        "CronList",
         "EnterPlanMode",
         "ExitPlanMode",
+        "ScheduleWakeup",
     }
 
 

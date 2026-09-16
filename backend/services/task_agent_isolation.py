@@ -51,6 +51,16 @@ CLAUDE_TASK_BUILTIN_TOOLS = (
 CLAUDE_TASK_INTERACTIVE_DISALLOWED_TOOLS = (
     "EnterPlanMode",
     "ExitPlanMode",
+    # Native Claude cron/wakeup turns run inside the provider session rather
+    # than through CCM's durable Dispatcher queue.  A disconnected foreground
+    # turn can therefore leave a recurring autonomous producer alive after the
+    # Task has been terminalized, which can starve later user messages.  CCM
+    # Monitor/Delivery scheduling remains available through their own MCP/API
+    # paths and must not use these provider-local schedulers.
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "ScheduleWakeup",
 )
 
 # An unrestricted administrator turn historically used Claude's complete
