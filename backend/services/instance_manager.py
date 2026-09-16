@@ -6582,6 +6582,13 @@ class InstanceManager:
 
         # Disable CC's auto-compact — CCM manages context/compaction itself
         env["DISABLE_AUTO_COMPACT"] = "true"
+        # Managed Tasks must not revive provider-local cron schedules from a
+        # resumable Claude session. CCM scheduling is handled by Dispatcher and
+        # durable Monitor/Delivery records instead.
+        if provider == "claude" and task_id is not None:
+            from backend.services.task_agent_isolation import CLAUDE_DISABLE_CRON
+
+            env[CLAUDE_DISABLE_CRON] = "1"
 
         # Forward Extended Thinking budget (Claude-specific env var)
         if thinking_budget and thinking_budget > 0 and provider == "claude":
@@ -8828,6 +8835,12 @@ class InstanceManager:
                     # Claude strips CLAUDE_* from the PTY parent environment,
                     # so this security switch must be an explicit override.
                     overrides[CLAUDE_SUBPROCESS_ENV_SCRUB] = "1"
+                    if task_id is not None:
+                        from backend.services.task_agent_isolation import (
+                            CLAUDE_DISABLE_CRON,
+                        )
+
+                        overrides[CLAUDE_DISABLE_CRON] = "1"
                     overrides["AUTH_TOKEN"] = ""
                     overrides["CCM_INTERNAL_SERVICE_TOKEN"] = ""
                     final_binary = wrapper or cfg.claude_binary

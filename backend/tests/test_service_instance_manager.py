@@ -59,6 +59,7 @@ from backend.services.mcp_config import (
     render_codex_exec_config_args,
 )
 from backend.services.task_agent_isolation import (
+    CLAUDE_DISABLE_CRON,
     CLAUDE_SUBPROCESS_ENV_SCRUB,
     CLAUDE_NATIVE_SUB_AGENT_TOOLS,
     CLAUDE_UNRESTRICTED_BUILTIN_TOOLS,
@@ -6948,6 +6949,42 @@ async def test_launch_without_thinking_budget_omits_env(db_factory):
 
     env = mock_exec.call_args[1]["env"]
     assert "MAX_THINKING_TOKENS" not in env
+    await asyncio.sleep(0.1)
+
+
+@pytest.mark.asyncio
+async def test_managed_claude_launch_disables_native_cron(db_factory):
+    """Managed Claude Tasks cannot revive provider-local cron schedules."""
+    async with db_factory() as db:
+        inst = Instance(name="managed-cron-inst")
+        task = Task(title="managed-cron-task", status="executing")
+        db.add_all([inst, task])
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst.current_task_id = task.id
+        task.instance_id = inst.id
+        await db.commit()
+        inst_id, task_id = inst.id, task.id
+
+    mock_proc = _make_mock_process()
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    with patch(
+        "backend.services.instance_manager.asyncio.create_subprocess_exec",
+        new_callable=AsyncMock,
+        return_value=mock_proc,
+    ) as mock_exec:
+        await im.launch(
+            instance_id=inst_id,
+            task_id=task_id,
+            prompt="hi",
+            cwd="/tmp",
+        )
+
+    assert mock_exec.call_args.kwargs["env"][CLAUDE_DISABLE_CRON] == "1"
     await asyncio.sleep(0.1)
 
 
