@@ -20916,6 +20916,72 @@ async def test_delete_cleanup_stops_runtime_owned_session_after_proof_generation
 
 
 @pytest.mark.asyncio
+async def test_reconcile_orphaned_pty_guard_requires_no_live_owner():
+    task_id = 902
+    session_id = "orphaned-timeout-session"
+    manager = InstanceManager(MagicMock(), types.SimpleNamespace())
+    manager._pty_backend = types.SimpleNamespace(
+        _sessions={},
+        _pool=types.SimpleNamespace(_sessions={}),
+    )
+    token = object()
+    manager._pty_autonomous_activity_handoffs[(task_id, session_id)] = token
+
+    owner = asyncio.create_task(asyncio.Event().wait())
+    manager._pty_autonomous_activity_handoff_owners[
+        (owner, (task_id, session_id))
+    ] = token
+    try:
+        assert not await manager.reconcile_orphaned_pty_runtime_guard(
+            task_id,
+            session_id,
+        )
+        assert manager.has_pty_autonomous_activity_handoff(task_id, session_id)
+    finally:
+        owner.cancel()
+        await asyncio.gather(owner, return_exceptions=True)
+        manager._pty_autonomous_activity_handoff_owners.pop(
+            (owner, (task_id, session_id)),
+            None,
+        )
+
+    assert await manager.reconcile_orphaned_pty_runtime_guard(
+        task_id,
+        session_id,
+    )
+    assert not manager.has_pty_autonomous_activity_handoff(task_id, session_id)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_orphaned_pty_guard_discards_dead_background_state():
+    task_id = 903
+    session_id = "dead-timeout-session"
+    manager = InstanceManager(MagicMock(), types.SimpleNamespace())
+    manager._pty_backend = types.SimpleNamespace(
+        _sessions={},
+        _pool=types.SimpleNamespace(_sessions={}),
+    )
+    session = types.SimpleNamespace(session_id=session_id, is_alive=False)
+    state = manager.register_pty_background_generation(
+        task_id,
+        session_id,
+        "dead-background-generation",
+        session,
+        task_retry_count=0,
+        task_turn_generation=7,
+    )
+    manager._pty_autonomous_activity_handoffs[(task_id, session_id)] = object()
+
+    assert await manager.reconcile_orphaned_pty_runtime_guard(
+        task_id,
+        session_id,
+    )
+    assert state.outcome == "superseded"
+    assert manager.pty_background_generation_for(task_id, session_id) is None
+    assert not manager.has_pty_autonomous_activity_handoff(task_id, session_id)
+
+
+@pytest.mark.asyncio
 async def test_pty_launch_callback_runs_immediately_before_backend_launch():
     im = InstanceManager(_FakeDBFactory(), MagicMock())
     instance_id = 17

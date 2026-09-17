@@ -15511,6 +15511,73 @@ async def test_queued_busy_detects_detached_pty_background_epoch(
 
 
 @pytest.mark.asyncio
+async def test_queued_busy_reconciles_orphaned_terminal_pty_handoff(
+    db_factory,
+):
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        task = Task(
+            title="timed out PTY turn",
+            description="d",
+            status="failed",
+            session_id="stopped-session",
+        )
+        db.add(task)
+        await db.commit()
+        task_id = task.id
+
+    d.instance_manager.has_pty_autonomous_activity_handoff = MagicMock(
+        side_effect=[True, False]
+    )
+    d.instance_manager.reconcile_orphaned_pty_runtime_guard = (
+        AsyncMock(return_value=True)
+    )
+
+    async with db_factory() as db:
+        assert not await d._queued_task_has_live_generation(db, task_id)
+
+    d.instance_manager.reconcile_orphaned_pty_runtime_guard.assert_awaited_once_with(
+        task_id,
+        "stopped-session",
+    )
+
+
+@pytest.mark.asyncio
+async def test_queued_busy_reconciles_orphaned_terminal_pty_background_state(
+    db_factory,
+):
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        task = Task(
+            title="timed out PTY background state",
+            description="d",
+            status="failed",
+            session_id="stopped-background-session",
+        )
+        db.add(task)
+        await db.commit()
+        task_id = task.id
+
+    d.instance_manager.pty_background_generation_for = MagicMock(
+        side_effect=["dead-background-generation", None]
+    )
+    d.instance_manager.has_pty_autonomous_activity_handoff = MagicMock(
+        return_value=False
+    )
+    d.instance_manager.reconcile_orphaned_pty_runtime_guard = (
+        AsyncMock(return_value=True)
+    )
+
+    async with db_factory() as db:
+        assert not await d._queued_task_has_live_generation(db, task_id)
+
+    d.instance_manager.reconcile_orphaned_pty_runtime_guard.assert_awaited_once_with(
+        task_id,
+        "stopped-background-session",
+    )
+
+
+@pytest.mark.asyncio
 async def test_queued_message_waits_for_detached_pty_background_epoch(
     db_factory,
     monkeypatch,

@@ -9979,6 +9979,69 @@ class InstanceManager:
         if proof is not None:
             self._discard_pty_post_exit_generation(key, proof)
 
+    async def reconcile_orphaned_pty_runtime_guard(
+        self,
+        task_id: int,
+        session_id: str,
+    ) -> bool:
+        """Retire terminal PTY guards after every exact owner is gone.
+
+        A forced PTY timeout can stop the native Session and fail-close the
+        durable Task while a background state and/or autonomous handoff token
+        remains indexed.  Those guards no longer have a durable owner, so a
+        later chat turn would otherwise wait forever.  Serialize with the
+        callback admission lock and keep any live Session, callback owner, or
+        post-exit proof fail-closed.
+
+        Return ``True`` when no runtime guard remains for the Task/session.
+        """
+
+        key = (task_id, session_id)
+        async with self.pty_background_transition(task_id, session_id):
+            state = self._pty_background_states.get(key)
+            has_handoff = key in self._pty_autonomous_activity_handoffs
+            if state is None and not has_handoff:
+                return True
+            if any(
+                owner_key == key and not owner.done()
+                for owner, owner_key in (
+                    self._pty_autonomous_activity_handoff_owners
+                )
+            ):
+                return False
+            if (
+                state is not None
+                and getattr(state.session, "is_alive", True) is not False
+            ):
+                return False
+
+            proof = self._pty_post_exit_generations.get(key)
+            if (
+                proof is not None
+                and getattr(proof.session, "is_alive", True) is not False
+            ):
+                return False
+            runtime_sessions = self._task_pty_runtime_session_candidates(
+                task_id,
+                session_id,
+            )
+            if any(
+                getattr(session, "is_alive", True) is not False
+                for _instance_id, session in runtime_sessions
+            ):
+                return False
+
+            if state is not None:
+                state.outcome = "superseded"
+                self._discard_pty_background_state(key, state.generation)
+            self.reset_pty_autonomous_activity_handoff(task_id, session_id)
+            logger.warning(
+                "Reconciled orphaned PTY runtime guard for task %s session %s",
+                task_id,
+                session_id,
+            )
+            return True
+
     def _restore_pty_background_after_failed_stop(
         self,
         state: _PtyBackgroundState,

@@ -22942,6 +22942,16 @@ Codex 中工具会显示为上述 mcp__ccm_monitor_agent__* canonical 名称；
             return True
         session_id = task.session_id
         if session_id:
+            reconcile_runtime_guard = getattr(
+                self.instance_manager,
+                "reconcile_orphaned_pty_runtime_guard",
+                None,
+            )
+            terminal_ownerless = bool(
+                task.instance_id is None
+                and task.status
+                in {"completed", "failed", "cancelled", "conflict"}
+            )
             generation_lookup = getattr(
                 self.instance_manager,
                 "pty_background_generation_for",
@@ -22950,7 +22960,15 @@ Codex 中工具会显示为上述 mcp__ccm_monitor_agent__* canonical 名称；
             if callable(generation_lookup):
                 generation = generation_lookup(task_id, session_id)
                 if isinstance(generation, str) and generation:
-                    return True
+                    if not (
+                        terminal_ownerless
+                        and callable(reconcile_runtime_guard)
+                        and await reconcile_runtime_guard(task_id, session_id)
+                    ):
+                        return True
+                    generation = generation_lookup(task_id, session_id)
+                    if isinstance(generation, str) and generation:
+                        return True
             handoff_lookup = getattr(
                 self.instance_manager,
                 "has_pty_autonomous_activity_handoff",
@@ -22961,7 +22979,17 @@ Codex 中工具会显示为上述 mcp__ccm_monitor_agent__* canonical 名称；
             ):
                 # The idle callback records this synchronously before its DB
                 # marker can be delayed on the transition lock.
-                return True
+                if not (
+                    terminal_ownerless
+                    and callable(reconcile_runtime_guard)
+                    and await reconcile_runtime_guard(task_id, session_id)
+                ):
+                    return True
+                # The exact transition lock invalidated the orphaned callback
+                # token. A new callback may still have published a replacement
+                # immediately afterwards, so sample once more before launch.
+                if handoff_lookup(task_id, session_id) is True:
+                    return True
         if task.instance_id is None:
             return False
         instance_id = task.instance_id
