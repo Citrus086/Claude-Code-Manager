@@ -8,6 +8,10 @@ vi.mock('../hooks/useWebSocket', () => ({
   useWebSocket: vi.fn(),
 }));
 
+vi.mock('../hooks/useVisibilityAwareInterval', () => ({
+  useVisibilityAwareInterval: vi.fn(),
+}));
+
 vi.mock('../api/client', () => ({
   api: {
     config: vi.fn(),
@@ -24,6 +28,7 @@ vi.mock('../api/client', () => ({
     rerunPRReview: vi.fn(),
     getPRMonitorGitHubIdentity: vi.fn(),
     getPRMonitorRun: vi.fn(),
+    checkPRMonitorHead: vi.fn(),
     bindPRMonitorDeveloper: vi.fn(),
     pausePRMonitorRun: vi.fn(),
     resumePRMonitorRun: vi.fn(),
@@ -36,6 +41,7 @@ vi.mock('../api/client', () => ({
 }));
 
 import { api } from '../api/client';
+import { useVisibilityAwareInterval } from '../hooks/useVisibilityAwareInterval';
 import { useWebSocket } from '../hooks/useWebSocket';
 
 const baseRepo: MonitoredRepo = {
@@ -199,6 +205,7 @@ describe('PRMonitorPage safety controls', () => {
       checked_at: '2026-08-16T01:00:00Z',
     });
     vi.mocked(api.getPRMonitorRun).mockResolvedValue(runFixture());
+    vi.mocked(api.checkPRMonitorHead).mockResolvedValue(runFixture());
     vi.mocked(api.bindPRMonitorDeveloper).mockResolvedValue(runFixture({ developer_task_id: 99 }));
     vi.mocked(api.pausePRMonitorRun).mockResolvedValue(runFixture({ status: 'paused' }));
     vi.mocked(api.resumePRMonitorRun).mockResolvedValue(runFixture());
@@ -1215,6 +1222,62 @@ describe('PRMonitorPage safety controls', () => {
     expect(screen.getByRole('button', { name: 'Merging…' })).toBeDisabled();
     await act(async () => mergeRequest.reject(new Error('merge rejected')));
     expect(await screen.findByRole('alert')).toHaveTextContent('Error: merge rejected');
+  });
+
+  it('keeps polling while a finished Review waits for its Run to finalize', async () => {
+    const user = userEvent.setup();
+    const review = reviewFixture({
+      status: 'approved',
+      ci_status: 'success',
+      ci_summary: 'All required checks passed',
+    });
+    const run = runFixture({ status: 'reviewing' });
+
+    await openReview(user, review, run);
+
+    await waitFor(() => {
+      expect(vi.mocked(useVisibilityAwareInterval).mock.calls.at(-1)?.[2]).toBe(true);
+    });
+  });
+
+  it('offers an immediate latest-head check when a synchronize webhook may be missing', async () => {
+    const user = userEvent.setup();
+    const run = runFixture({ status: 'waiting_for_fix' });
+    vi.mocked(api.checkPRMonitorHead).mockResolvedValue(run);
+    await openReview(user, reviewFixture({ status: 'commented', action_taken: 'review_comments' }), run);
+
+    await user.click(screen.getByRole('button', { name: 'Check latest head' }));
+    await waitFor(() => expect(api.checkPRMonitorHead).toHaveBeenCalledWith(run.id));
+    expect(screen.queryByRole('button', { name: 'Checking latest head…' })).not.toBeInTheDocument();
+  });
+
+  it('selects the replacement Review when latest-head check finds a new commit', async () => {
+    const user = userEvent.setup();
+    const oldReview = reviewFixture({ status: 'commented', action_taken: 'review_comments' });
+    const newReview = reviewFixture({
+      id: 12,
+      status: 'reviewing',
+      head_sha: 'new-head-sha',
+      pr_title: 'Harden the widget loop · new head',
+    });
+    const run = runFixture({ status: 'waiting_for_fix' });
+    const replacementRun = runFixture({
+      status: 'reviewing',
+      current_review_id: newReview.id,
+      current_head_sha: newReview.head_sha!,
+    });
+    vi.mocked(api.getReviewDetail).mockImplementation(async (reviewId: number) => (
+      reviewId === oldReview.id ? oldReview : newReview
+    ));
+    vi.mocked(api.checkPRMonitorHead).mockResolvedValue(replacementRun);
+
+    await openReview(user, oldReview, run);
+    vi.mocked(api.getRepoReviews).mockResolvedValue([newReview]);
+    vi.mocked(api.getPRMonitorRun).mockResolvedValue(replacementRun);
+    await user.click(screen.getByRole('button', { name: 'Check latest head' }));
+
+    await waitFor(() => expect(api.getReviewDetail).toHaveBeenCalledWith(newReview.id));
+    expect(api.checkPRMonitorHead).toHaveBeenCalledWith(run.id);
   });
 
   it('shows unbind pending and failure states only when the run is safe to mutate', async () => {

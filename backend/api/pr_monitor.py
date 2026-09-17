@@ -4502,6 +4502,54 @@ async def get_monitor_run(
     return payload
 
 
+@router.post("/runs/{run_id}/check-head", response_model=PRMonitorRunResponse)
+async def check_monitor_run_head(
+    run_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Immediately reconcile a missed GitHub ``synchronize`` delivery.
+
+    GitHub normally delivers this event when a contributor pushes a fix to an
+    already-reviewed PR.  A webhook outage must not leave the old commented
+    head as the apparent current state, so this endpoint performs the same
+    exact-head reconciliation used by the periodic recovery producer. It is
+    deliberately read-first and routes any detected change through the same
+    signed synchronize and exact-generation supersede protocol.
+    """
+
+    run = await db.get(PRMonitorRun, run_id)
+    if run is None:
+        raise HTTPException(404, "PR Monitor Run not found")
+    repo = await db.get(MonitoredRepo, run.repo_id)
+    if repo is None:
+        raise HTTPException(404, "Repository not found")
+    await _require_pr_monitor_access(request, db, repo)
+    if not repo.enabled:
+        raise HTTPException(409, "Enable the PR monitor before checking the PR head")
+    if run.status in {"merged", "closed"} or run.completed_at is not None:
+        raise HTTPException(409, "A terminal PR Monitor Run cannot be refreshed")
+
+    db_factory = async_sessionmaker(
+        bind=db.bind,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+    await db.rollback()
+    owned_client = httpx.AsyncClient(timeout=180, trust_env=False)
+    try:
+        await reconcile_missed_pr_synchronizes(
+            db_factory,
+            limit=1,
+            run_id=run_id,
+            ignore_cutoff=True,
+            http_client=owned_client,
+        )
+    finally:
+        await owned_client.aclose()
+    return await get_monitor_run(run_id, request, db)
+
+
 @router.post("/runs/{run_id}/bind-developer", response_model=PRMonitorRunResponse)
 async def bind_monitor_developer(
     run_id: int,
@@ -6925,6 +6973,8 @@ async def reconcile_missed_pr_synchronizes(
     db_factory,
     *,
     limit: int = 5,
+    run_id: int | None = None,
+    ignore_cutoff: bool = False,
     http_client: httpx.AsyncClient | None = None,
 ) -> int:
     """Recover PR head changes when GitHub's synchronize delivery was lost.
@@ -6963,6 +7013,11 @@ async def reconcile_missed_pr_synchronizes(
             )
             .where(
                 MonitoredRepo.enabled.is_(True),
+                *(
+                    [PRMonitorRun.id == run_id]
+                    if run_id is not None
+                    else []
+                ),
                 PRMonitorRun.status.not_in(("merged", "closed")),
                 PRMonitorRun.completed_at.is_(None),
                 PRMonitorRun.terminal_intent_status.is_(None),
@@ -6970,7 +7025,10 @@ async def reconcile_missed_pr_synchronizes(
                 PRMonitorRun.terminal_intent_head_sha.is_(None),
                 PRMonitorRun.terminal_intent_delivery_id.is_(None),
                 PRMonitorRun.terminal_intent_observed_at.is_(None),
-                PRMonitorRun.updated_at <= cutoff,
+                or_(
+                    literal(bool(ignore_cutoff)),
+                    PRMonitorRun.updated_at <= cutoff,
+                ),
                 or_(
                     PRMonitorRun.pause_reason.is_(None),
                     PRMonitorRun.pause_reason != "direct_merge_base_update_requested",

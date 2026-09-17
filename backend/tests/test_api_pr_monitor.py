@@ -5948,6 +5948,41 @@ async def test_missed_synchronize_recovery_reviews_new_head_after_comments(
 
 
 @pytest.mark.asyncio
+async def test_check_head_endpoint_forces_immediate_missed_synchronize_scan(
+    client,
+    session_factory,
+    monkeypatch,
+):
+    """The UI fallback scans one Run immediately instead of waiting for recovery."""
+
+    import backend.api.pr_monitor as pr_monitor_api
+
+    repo = await _create_repo(client, "owner/check-head")
+    _review_id, run_id = await _seed_public_pr_result(
+        session_factory,
+        repo_id=repo["id"],
+        pr_number=147,
+        head_sha=HEAD_SHA_1,
+        review_status="commented",
+        run_status="waiting_for_fix",
+        code_verdict="changes_required",
+        publication_state="published",
+        completed_at=datetime.utcnow(),
+    )
+    scan = AsyncMock(return_value=0)
+    monkeypatch.setattr(pr_monitor_api, "reconcile_missed_pr_synchronizes", scan)
+
+    response = await client.post(f"/api/pr-monitor/runs/{run_id}/check-head")
+
+    assert response.status_code == 200, response.text
+    scan.assert_awaited_once()
+    kwargs = scan.await_args.kwargs
+    assert kwargs["run_id"] == run_id
+    assert kwargs["ignore_cutoff"] is True
+    assert kwargs["limit"] == 1
+
+
+@pytest.mark.asyncio
 async def test_webhook_synchronize_persists_recovery_intent_before_cleanup(
     client,
     session_factory,
