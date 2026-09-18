@@ -15433,6 +15433,101 @@ async def test_queued_busy_ignores_lifecycle_that_reused_historical_instance(
 
 
 @pytest.mark.asyncio
+async def test_queued_busy_reconciles_terminal_ownerless_stale_lifecycle(
+    db_factory,
+):
+    """A dead cleanup coroutine must not permanently block later chat."""
+
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        task = Task(
+            title="failed terminal turn",
+            description="d",
+            status="failed",
+            session_id="resumable-session",
+        )
+        db.add(task)
+        await db.flush()
+        instance = Instance(
+            name="released-error-slot",
+            status="error",
+            pid=None,
+            current_task_id=None,
+        )
+        db.add(instance)
+        await db.flush()
+        task.instance_id = instance.id
+        await db.commit()
+        task_id, instance_id = task.id, instance.id
+
+    lifecycle = asyncio.create_task(asyncio.Event().wait())
+    setattr(lifecycle, "_ccm_task_id", task_id)
+    d._running_tasks[instance_id] = lifecycle
+
+    async with db_factory() as db:
+        assert not await d._queued_task_has_live_generation(db, task_id)
+
+    assert d._running_tasks.get(instance_id) is None
+    assert lifecycle.cancelling()
+    await asyncio.gather(lifecycle, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("instance_kwargs", "manager_running"),
+    [
+        ({"status": "running", "current_task_id": "task"}, False),
+        ({"status": "error", "pid": 99125}, False),
+        ({"status": "error"}, True),
+    ],
+)
+async def test_queued_busy_keeps_terminal_lifecycle_with_runtime_evidence(
+    db_factory,
+    instance_kwargs,
+    manager_running,
+):
+    """Any durable owner, PID, or manager runtime keeps replay fail-closed."""
+
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        task = Task(
+            title="terminal turn with runtime evidence",
+            description="d",
+            status="failed",
+            session_id="resumable-session",
+        )
+        db.add(task)
+        await db.flush()
+        instance_values = dict(instance_kwargs)
+        current_task_id = instance_values.pop("current_task_id", None)
+        instance = Instance(
+            name="runtime-evidence-slot",
+            current_task_id=(
+                task.id if current_task_id == "task" else current_task_id
+            ),
+            **instance_values,
+        )
+        db.add(instance)
+        await db.flush()
+        task.instance_id = instance.id
+        await db.commit()
+        task_id, instance_id = task.id, instance.id
+
+    d.instance_manager.is_running = MagicMock(return_value=manager_running)
+    lifecycle = asyncio.create_task(asyncio.Event().wait())
+    setattr(lifecycle, "_ccm_task_id", task_id)
+    d._running_tasks[instance_id] = lifecycle
+    try:
+        async with db_factory() as db:
+            assert await d._queued_task_has_live_generation(db, task_id)
+        assert d._running_tasks.get(instance_id) is lifecycle
+        assert not lifecycle.cancelling()
+    finally:
+        lifecycle.cancel()
+        await asyncio.gather(lifecycle, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_queued_busy_ignores_stale_consumer_after_instance_reassignment(
     db_factory,
 ):

@@ -23009,9 +23009,43 @@ Codex 中工具会显示为上述 mcp__ccm_monitor_agent__* canonical 名称；
             return False
 
         lifecycle = self._running_tasks.get(instance_id)
+        manager_running = bool(self.instance_manager.is_running(instance_id))
         if lifecycle is not None and not lifecycle.done():
             lifecycle_task_id = getattr(lifecycle, "_ccm_task_id", None)
             if lifecycle_task_id == task_id:
+                if (
+                    task.status
+                    in {
+                        "completed",
+                        "failed",
+                        "cancelled",
+                        "conflict",
+                        "superseded",
+                    }
+                    and instance is not None
+                    and instance.status in {"idle", "error"}
+                    and instance.current_task_id is None
+                    and instance.current_plan_run_id is None
+                    and instance.pid is None
+                    and not manager_running
+                ):
+                    # A lifecycle can remain suspended in terminal cleanup
+                    # after its exact process/consumer and reverse owner have
+                    # already been released.  It has no remaining execution
+                    # authority, so retaining it here would block every later
+                    # chat turn forever.  Detach and cancel only from this
+                    # fully terminal, ownerless, pid-less snapshot; the old
+                    # generation's cleanup writers remain CAS-fenced from a
+                    # replacement turn.
+                    self._remove_running_task_if_same(instance_id, lifecycle)
+                    lifecycle.cancel()
+                    logger.warning(
+                        "Reconciled stale terminal lifecycle for task %s on "
+                        "instance %s",
+                        task_id,
+                        instance_id,
+                    )
+                    return False
                 # Fresh lifecycle preparation precedes
                 # Instance.current_task_id/PID persistence, so the explicit
                 # in-memory binding is authoritative in that launch window.
@@ -23036,7 +23070,6 @@ Codex 中工具会显示为上述 mcp__ccm_monitor_agent__* canonical 名称；
             launch_params.get(instance_id) if isinstance(launch_params, dict) else None
         )
         params_task_id = params.get("task_id") if isinstance(params, dict) else None
-        manager_running = bool(self.instance_manager.is_running(instance_id))
         if manager_running and (record_task_id == task_id or params_task_id == task_id):
             # Instance.current_task_id can be cleared near the end of output
             # persistence while the exact Codex consumer still owns rollout
