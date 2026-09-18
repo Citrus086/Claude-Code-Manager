@@ -1887,19 +1887,39 @@ async def test_inject_pty_reuses_background_session_without_second_consumer():
             99,
             session,
         ) is True
-        # The native Session exposes the follow-up process while its pump is
-        # still draining.  It must not be mistaken for a separate foreground
-        # turn and steered a second time.
+        followup = next(iter(manager._pty_followup_tasks[7]))
+        for _ in range(20):
+            if (
+                getattr(followup, "_ccm_followup_native_process", None)
+                is followup_process
+            ):
+                break
+            await asyncio.sleep(0)
+        assert (
+            getattr(followup, "_ccm_followup_native_process", None)
+            is followup_process
+        )
+
+        # Once the pump has proven ownership of the active process, a later
+        # injection is a same-turn steer. It does not create a second prompt
+        # pump or claim a second retained boundary operation.
         assert await manager.inject_pty_message(
             session.session_id,
-            "must wait for the first follow-up",
+            "steer the active follow-up",
             task_id=99,
             task_retry_count=2,
             task_turn_generation=3,
             expected_instance_id=7,
             followup_operation_id="followup-99-second",
-        ) is False
-        session.steer_active_turn.assert_not_awaited()
+        ) is True
+        session.steer_active_turn.assert_awaited_once_with(
+            "steer the active follow-up",
+            expected_process=followup_process,
+        )
+        assert manager.consume_pty_followup_operation_route(
+            "followup-99-second"
+        ) == (True, None)
+        assert len(manager._pty_followup_tasks[7]) == 1
 
         release_followup.set()
         await asyncio.wait_for(

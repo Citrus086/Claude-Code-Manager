@@ -2049,6 +2049,27 @@ class InstanceManager:
             """Route pre-prompt child output back through its lifecycle owner."""
 
             event_dict = event.to_dict()
+            if current is not None:
+                # ``send_prompt`` exposes its exact process only after the
+                # follow-up prompt has crossed the JSONL start boundary. Keep
+                # that identity on the pump so a later live injection can
+                # distinguish steering this follow-up from steering an
+                # unrelated autonomous child on the same retained Session.
+                active_process = getattr(session, "active_turn_process", None)
+                if (
+                    active_process is not None
+                    and getattr(
+                        current,
+                        "_ccm_followup_native_process",
+                        None,
+                    )
+                    is None
+                ):
+                    setattr(
+                        current,
+                        "_ccm_followup_native_process",
+                        active_process,
+                    )
             if event_dict.get("orphan"):
                 callback = getattr(session, "on_autonomous_event", None)
                 callback_matches = bool(
@@ -2659,23 +2680,57 @@ class InstanceManager:
             native_process = getattr(session, "active_turn_process", None)
             steer = getattr(session, "steer_active_turn", None)
             if native_process is not None:
-                if retained_proof is not None and not exact_turn:
+                followups = tuple(
+                    followup
+                    for followup in self._pty_followup_tasks.get(key, ())
+                    if not followup.done()
+                )
+                owning_followups = tuple(
+                    followup
+                    for followup in followups
+                    if getattr(
+                        followup,
+                        "_ccm_followup_native_process",
+                        None,
+                    )
+                    is native_process
+                )
+                if followups and len(owning_followups) == 0:
+                    started_followups = tuple(
+                        followup
+                        for followup in followups
+                        if getattr(
+                            followup,
+                            "_ccm_followup_started",
+                            False,
+                        )
+                    )
+                    if len(started_followups) == 1:
+                        # The follow-up pump owns Session.send_lock for its
+                        # whole stream. If the PTY library has published the
+                        # process before our first event callback, bind that
+                        # process to the one started pump now.
+                        setattr(
+                            started_followups[0],
+                            "_ccm_followup_native_process",
+                            native_process,
+                        )
+                        owning_followups = started_followups
+                if followups and len(owning_followups) != 1:
                     logger.info(
-                        "PTY steer rejected for session %s: retained proof "
-                        "has no idle follow-up boundary",
+                        "PTY steer rejected for session %s: active process "
+                        "ownership is not proven by one retained follow-up",
                         session_id,
                     )
                     return False
-                # A retained follow-up pump owns the Session's current native
-                # process after ``send_prompt`` starts.  Do not mistake that
-                # process for an independent foreground turn: steering it
-                # would bypass the serialized follow-up slot and leave the
-                # second API operation waiting for a boundary it cannot own.
-                followups = self._pty_followup_tasks.get(key, ())
-                if any(not followup.done() for followup in followups):
+                if (
+                    retained_proof is not None
+                    and not exact_turn
+                    and len(owning_followups) != 1
+                ):
                     logger.info(
-                        "PTY steer rejected for session %s: a retained "
-                        "follow-up prompt is already being consumed",
+                        "PTY steer rejected for session %s: retained proof "
+                        "does not own the active process",
                         session_id,
                     )
                     return False
