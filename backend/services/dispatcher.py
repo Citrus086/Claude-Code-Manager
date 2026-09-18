@@ -22940,6 +22940,16 @@ Codex 中工具会显示为上述 mcp__ccm_monitor_agent__* canonical 名称；
             # would create two writers for the same native session. Keep the
             # queued message pending until its exact durable fence is cleared.
             return True
+        instance_id = task.instance_id
+        instance = (
+            await db.get(Instance, instance_id, populate_existing=True)
+            if instance_id is not None
+            else None
+        )
+        manager_running = bool(
+            instance_id is not None
+            and self.instance_manager.is_running(instance_id)
+        )
         session_id = task.session_id
         if session_id:
             reconcile_runtime_guard = getattr(
@@ -22948,9 +22958,19 @@ Codex 中工具会显示为上述 mcp__ccm_monitor_agent__* canonical 名称；
                 None,
             )
             terminal_ownerless = bool(
-                task.instance_id is None
-                and task.status
+                task.status
                 in {"completed", "failed", "cancelled", "conflict"}
+                and (
+                    instance_id is None
+                    or (
+                        instance is not None
+                        and instance.status in {"idle", "error"}
+                        and instance.current_task_id is None
+                        and instance.current_plan_run_id is None
+                        and instance.pid is None
+                        and not manager_running
+                    )
+                )
             )
             generation_lookup = getattr(
                 self.instance_manager,
@@ -22990,11 +23010,8 @@ Codex 中工具会显示为上述 mcp__ccm_monitor_agent__* canonical 名称；
                 # immediately afterwards, so sample once more before launch.
                 if handoff_lookup(task_id, session_id) is True:
                     return True
-        if task.instance_id is None:
+        if instance_id is None:
             return False
-        instance_id = task.instance_id
-
-        instance = await db.get(Instance, instance_id, populate_existing=True)
         if (
             instance is not None
             and instance.current_task_id is not None
@@ -23009,7 +23026,6 @@ Codex 中工具会显示为上述 mcp__ccm_monitor_agent__* canonical 名称；
             return False
 
         lifecycle = self._running_tasks.get(instance_id)
-        manager_running = bool(self.instance_manager.is_running(instance_id))
         if lifecycle is not None and not lifecycle.done():
             lifecycle_task_id = getattr(lifecycle, "_ccm_task_id", None)
             if lifecycle_task_id == task_id:

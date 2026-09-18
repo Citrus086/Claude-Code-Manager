@@ -15673,6 +15673,91 @@ async def test_queued_busy_reconciles_orphaned_terminal_pty_background_state(
 
 
 @pytest.mark.asyncio
+async def test_queued_busy_reconciles_guard_with_retained_dead_instance(
+    db_factory,
+):
+    """A terminal Task may retain its last now-ownerless Instance id."""
+
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        instance = Instance(
+            name="dead PTY slot",
+            status="error",
+            pid=None,
+            current_task_id=None,
+            current_plan_run_id=None,
+        )
+        db.add(instance)
+        await db.flush()
+        task = Task(
+            title="timed out PTY retained slot",
+            description="d",
+            status="failed",
+            session_id="stopped-retained-session",
+            instance_id=instance.id,
+        )
+        db.add(task)
+        await db.commit()
+        task_id = task.id
+
+    d.instance_manager.is_running = MagicMock(return_value=False)
+    d.instance_manager.has_pty_autonomous_activity_handoff = MagicMock(
+        side_effect=[True, False]
+    )
+    d.instance_manager.reconcile_orphaned_pty_runtime_guard = (
+        AsyncMock(return_value=True)
+    )
+
+    async with db_factory() as db:
+        assert not await d._queued_task_has_live_generation(db, task_id)
+
+    d.instance_manager.reconcile_orphaned_pty_runtime_guard.assert_awaited_once_with(
+        task_id,
+        "stopped-retained-session",
+    )
+
+
+@pytest.mark.asyncio
+async def test_queued_busy_keeps_guard_with_retained_live_instance(
+    db_factory,
+):
+    """A retained slot is not ownerless while its manager generation is live."""
+
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        instance = Instance(
+            name="live PTY slot",
+            status="error",
+            pid=None,
+            current_task_id=None,
+            current_plan_run_id=None,
+        )
+        db.add(instance)
+        await db.flush()
+        task = Task(
+            title="PTY retained live generation",
+            description="d",
+            status="failed",
+            session_id="live-retained-session",
+            instance_id=instance.id,
+        )
+        db.add(task)
+        await db.commit()
+        task_id = task.id
+
+    d.instance_manager.is_running = MagicMock(return_value=True)
+    d.instance_manager.has_pty_autonomous_activity_handoff = MagicMock(
+        return_value=True
+    )
+    d.instance_manager.reconcile_orphaned_pty_runtime_guard = AsyncMock()
+
+    async with db_factory() as db:
+        assert await d._queued_task_has_live_generation(db, task_id)
+
+    d.instance_manager.reconcile_orphaned_pty_runtime_guard.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_queued_message_waits_for_detached_pty_background_epoch(
     db_factory,
     monkeypatch,
