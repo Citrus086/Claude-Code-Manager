@@ -31,7 +31,10 @@ from backend.models.worker_task_termination import (
 
 from backend.models.log_entry import LogEntry
 from backend.services.context_compaction import (
+    CLAUDE_EMPTY_REQUEST_ANOMALY_ERROR,
+    CLAUDE_EMPTY_REQUEST_ANOMALY_REASON,
     build_compacted_resume_prompt,
+    is_claude_empty_request_claim,
     is_upstream_http_400_context_error,
     read_codex_rollout_last_usage,
 )
@@ -86,6 +89,7 @@ _CLAUDE_PROMPT_STDIN_THRESHOLD_BYTES = 64 * 1024
 # without mutating the user's configured preference or replaying the failed
 # turn after it crossed the provider boundary.
 _CLAUDE_ADAPTIVE_EFFORT_METADATA_KEY = "_ccm_claude_adaptive_effort"
+_CLAUDE_TODO_REMINDER_MODE_ENV = "CLAUDE_CODE_TODO_REMINDER_MODE"
 
 
 def _is_claude_adaptive_schema_error(message: str | None) -> bool:
@@ -819,6 +823,8 @@ class _ClaudeNoProgressState:
     tool_activity_seen: bool = False
     triggered: bool = False
     recovery_claimed: bool = False
+    empty_request_claims: int = 0
+    empty_request_triggered: bool = False
 
     def mark_tool_activity(self) -> None:
         self.tool_activity_seen = True
@@ -934,6 +940,30 @@ class _ClaudeNoProgressState:
             self.triggered = True
             return True
         return False
+
+    def observe_empty_request_claim(
+        self,
+        event: dict,
+        *,
+        authoritative_user_text: object,
+    ) -> bool:
+        """Detect repeated false empty-input claims without replay authority."""
+
+        if self.empty_request_triggered:
+            return False
+        if (
+            not isinstance(authoritative_user_text, str)
+            or not authoritative_user_text.strip()
+            or event.get("event_type") != "message"
+            or event.get("role") != "assistant"
+            or not is_claude_empty_request_claim(event.get("content"))
+        ):
+            return False
+        self.empty_request_claims += 1
+        if self.empty_request_claims < 2:
+            return False
+        self.empty_request_triggered = True
+        return True
 
 
 @dataclass
@@ -6582,6 +6612,12 @@ class InstanceManager:
 
         # Disable CC's auto-compact — CCM manages context/compaction itself
         env["DISABLE_AUTO_COMPACT"] = "true"
+        if provider == "claude":
+            # Claude Code 2.1.270 can emit an empty task_reminder attachment
+            # after several turns, which the model may misread as a new empty
+            # user request. This is a supported baseline/off CLI environment
+            # setting; CCM owns progress tracking, so disable the reminder.
+            env[_CLAUDE_TODO_REMINDER_MODE_ENV] = "off"
 
         # Forward Extended Thinking budget (Claude-specific env var)
         if thinking_budget and thinking_budget > 0 and provider == "claude":
@@ -8828,6 +8864,7 @@ class InstanceManager:
                     # Claude strips CLAUDE_* from the PTY parent environment,
                     # so this security switch must be an explicit override.
                     overrides[CLAUDE_SUBPROCESS_ENV_SCRUB] = "1"
+                    overrides[_CLAUDE_TODO_REMINDER_MODE_ENV] = "off"
                     overrides["AUTH_TOKEN"] = ""
                     overrides["CCM_INTERNAL_SERVICE_TOKEN"] = ""
                     final_binary = wrapper or cfg.claude_binary
@@ -17780,6 +17817,14 @@ class InstanceManager:
             no_progress = None
         if no_progress is not None:
             triggered = no_progress.observe(event, now=time.monotonic())
+            empty_request_triggered = no_progress.observe_empty_request_claim(
+                event,
+                authoritative_user_text=(
+                    self._launch_params.get(instance_id, {}).get(
+                        "current_message"
+                    )
+                ),
+            )
             has_stop_reason, stop_reason = no_progress._stop_reason(event)
             if (
                 no_progress.triggered
@@ -17790,7 +17835,51 @@ class InstanceManager:
                 and stop_reason is None
             ):
                 return
-            if triggered:
+            if empty_request_triggered:
+                failure = (
+                    f"{CLAUDE_EMPTY_REQUEST_ANOMALY_ERROR}; "
+                    "the authoritative user message was nonempty"
+                )
+                object.__setattr__(
+                    event_record,
+                    "fatal_provider_error",
+                    failure,
+                )
+                logger.error(
+                    "Interrupting polluted Claude session for instance %s "
+                    "task %s after %s false empty-request claims",
+                    instance_id,
+                    task_id,
+                    no_progress.empty_request_claims,
+                )
+                await self._interrupt_no_progress_claude_turn(
+                    instance_id,
+                    event_record.process,
+                )
+                event = dict(event)
+                event.update(
+                    event_type="system_event",
+                    role="system",
+                    content=(
+                        "Claude 错误地把内部空提醒识别成用户请求；CCM 已中止"
+                        "并隔离当前会话。为避免重复工具副作用，本轮不会自动"
+                        "重放；下一条明确消息会在保存工作状态后使用新会话。"
+                    ),
+                    is_error=True,
+                    protocol_anomaly=CLAUDE_EMPTY_REQUEST_ANOMALY_REASON,
+                    raw_json=json.dumps(
+                        {
+                            "type": "ccm.turn.failed",
+                            "version": 1,
+                            "provider": "claude",
+                            "reason": CLAUDE_EMPTY_REQUEST_ANOMALY_REASON,
+                            "recovery": "next_explicit_message",
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                )
+            elif triggered:
                 retry_attempt = (
                     self._launch_params.get(instance_id, {}).get(
                         "no_progress_retry_attempt", 0

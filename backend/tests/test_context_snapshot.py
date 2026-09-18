@@ -11,6 +11,8 @@ from backend.services.context_compaction import build_compacted_resume_prompt
 from backend.services.context_snapshot import (
     CONTEXT_SNAPSHOT_EVENT_TYPE,
     CONTEXT_SNAPSHOT_TYPE,
+    CONTEXT_SNAPSHOT_VERSION,
+    capture_context_recovery_snapshot,
 )
 from backend.services.dispatcher import GlobalDispatcher
 
@@ -19,6 +21,81 @@ def _dispatcher(db_factory) -> GlobalDispatcher:
     instance_manager = MagicMock()
     broadcaster = MagicMock()
     return GlobalDispatcher(db_factory, instance_manager, broadcaster)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_filters_empty_request_pollution_from_current_and_prior_state(
+    db_factory,
+):
+    polluted = "我理解你持续发送空请求。让我停下来。"
+    async with db_factory() as db:
+        task = Task(
+            title="polluted recovery",
+            status="failed",
+            provider="claude",
+            session_id="polluted-session",
+            turn_generation=4,
+        )
+        db.add(task)
+        await db.flush()
+        db.add(
+            LogEntry(
+                task_id=task.id,
+                event_type=CONTEXT_SNAPSHOT_EVENT_TYPE,
+                role="system",
+                content="prior snapshot",
+                raw_json=json.dumps(
+                    {
+                        "type": CONTEXT_SNAPSHOT_TYPE,
+                        "version": CONTEXT_SNAPSHOT_VERSION,
+                        "state": {
+                            "stage_conclusions": [
+                                {"log_id": 1, "text": polluted},
+                                {"log_id": 2, "text": "Keep this conclusion"},
+                            ]
+                        },
+                    }
+                ),
+                is_error=False,
+            )
+        )
+        db.add(
+            LogEntry(
+                task_id=task.id,
+                event_type="message",
+                role="assistant",
+                content="我看到你发送了空消息。让我继续。",
+                is_error=False,
+            )
+        )
+        await db.flush()
+
+        rendered = await capture_context_recovery_snapshot(
+            db,
+            task,
+            session_id=task.session_id,
+            reason="empty_request_hallucination",
+        )
+        await db.commit()
+        latest = (
+            await db.execute(
+                select(LogEntry)
+                .where(
+                    LogEntry.task_id == task.id,
+                    LogEntry.event_type == CONTEXT_SNAPSHOT_EVENT_TYPE,
+                )
+                .order_by(LogEntry.id.desc())
+                .limit(1)
+            )
+        ).scalar_one()
+        payload = json.loads(latest.raw_json)
+
+    serialized = json.dumps(payload["state"], ensure_ascii=False)
+    assert polluted not in rendered
+    assert "我看到你发送了空消息" not in rendered
+    assert polluted not in serialized
+    assert "我看到你发送了空消息" not in serialized
+    assert "Keep this conclusion" in rendered
 
 
 @pytest.mark.asyncio

@@ -49,6 +49,7 @@ from backend.services.context_compaction import (
     build_compacted_task_retry_prompt,
     context_compact_threshold_with_headroom,
     context_tokens_used,
+    is_claude_empty_request_claim,
     is_upstream_http_400_context_error,
     recoverable_chat_context_failure,
 )
@@ -25650,9 +25651,16 @@ Codex 中工具会显示为上述 mcp__ccm_monitor_agent__* canonical 名称；
                     select(LogEntry)
                     .where(*conditions)
                     .order_by(LogEntry.id.desc())
-                    .limit(1)
+                    .limit(12)
                 )
-                return result.scalar_one_or_none()
+                return next(
+                    (
+                        entry
+                        for entry in result.scalars().all()
+                        if not is_claude_empty_request_claim(entry.content)
+                    ),
+                    None,
+                )
 
             history_blocks: list[str] = []
             for index, user_entry in enumerate(users):

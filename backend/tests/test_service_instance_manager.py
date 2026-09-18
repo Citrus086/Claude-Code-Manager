@@ -640,6 +640,139 @@ async def test_process_event_interrupts_task_584_pty_loop_once(
     assert "CCM 已中止" in entries[-1].content
 
 
+@pytest.mark.asyncio
+async def test_process_event_quarantines_toolful_empty_request_hallucination(
+    db_factory,
+):
+    async with db_factory() as db:
+        instance = Instance(name="claude-empty-request", status="running")
+        task = Task(
+            title="task 552 reproduction",
+            status="executing",
+            provider="claude",
+        )
+        db.add_all([instance, task])
+        await db.flush()
+        started_at = datetime.utcnow()
+        task.instance_id = instance.id
+        task.started_at = started_at
+        instance.pid = 55_200
+        instance.started_at = started_at
+        instance.current_task_id = task.id
+        await db.commit()
+        instance_id = instance.id
+        task_id = task.id
+        retry_count = task.retry_count
+        turn_generation = task.turn_generation
+
+    process = _make_mock_process(pid=55_200, returncode=None)
+    session = MagicMock(
+        session_id="dcab94a3-63ad-40bc-9220-45b63c0fdfab",
+        send_interrupt=AsyncMock(),
+    )
+    process.session = session
+    consumer = asyncio.current_task()
+    assert consumer is not None
+    record = _OutputConsumerRecord(
+        process=process,
+        task=consumer,
+        chat_initiated=True,
+        provider="claude",
+        task_id=task_id,
+        task_retry_count=retry_count,
+        task_turn_generation=turn_generation,
+        instance_started_at=started_at,
+    )
+    manager = InstanceManager(db_factory, MagicMock(broadcast=AsyncMock()))
+    manager._pty_backend = MagicMock()
+    manager._pty_backend._sessions = {instance_id: session}
+    manager.processes[instance_id] = process
+    manager._tasks[instance_id] = consumer
+    manager._consumer_records[instance_id] = record
+    manager._launch_params[instance_id] = {
+        "current_message": "继续完成形式化证明",
+        "source_log_id": 1,
+        "no_progress_retry_attempt": 0,
+    }
+
+    def assistant_event(content: str) -> dict:
+        return {
+            "event_type": "message",
+            "role": "assistant",
+            "content": content,
+            "raw_json": json.dumps(
+                {
+                    "type": "assistant",
+                    "session_id": session.session_id,
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": content}],
+                        "stop_reason": "tool_use",
+                    },
+                }
+            ),
+            "is_error": False,
+        }
+
+    await manager._process_event(
+        instance_id,
+        task_id,
+        assistant_event("我看到你发送了空消息。让我先检查文件。"),
+    )
+    await manager._process_event(
+        instance_id,
+        task_id,
+        {
+            "event_type": "tool_result",
+            "role": "tool",
+            "content": "proof state",
+            "raw_json": json.dumps(
+                {
+                    "type": "user",
+                    "session_id": session.session_id,
+                    "message": {
+                        "content": [
+                            {"type": "tool_result", "content": "proof state"}
+                        ]
+                    },
+                }
+            ),
+            "is_error": False,
+        },
+    )
+    await manager._process_event(
+        instance_id,
+        task_id,
+        assistant_event("我理解你持续发送空请求。让我停下来。"),
+    )
+
+    session.send_interrupt.assert_awaited_once_with()
+    assert record.claude_no_progress.tool_activity_seen is True
+    assert record.claude_no_progress.empty_request_triggered is True
+    assert record.fatal_provider_error is not None
+    assert record.fatal_provider_error.startswith(
+        "Claude session protocol anomaly"
+    )
+    async with db_factory() as db:
+        entries = list(
+            (
+                await db.scalars(
+                    select(LogEntry)
+                    .where(LogEntry.task_id == task_id)
+                    .order_by(LogEntry.id)
+                )
+            ).all()
+        )
+    assert [entry.event_type for entry in entries] == [
+        "message",
+        "tool_result",
+        "system_event",
+    ]
+    assert entries[-1].is_error is True
+    marker = json.loads(entries[-1].raw_json)
+    assert marker["reason"] == "empty_request_hallucination"
+
+
 def test_claude_hot_runtime_fingerprint_covers_mcp_and_full_git_environment(
     tmp_path,
 ):
@@ -6782,6 +6915,7 @@ async def test_cloudrouter_claude_pty_projects_direct_auth_for_model_only(
         "https://console.cloudrouter.online"
     )
     assert observed["env"][CLAUDE_SUBPROCESS_ENV_SCRUB] == "1"
+    assert observed["env"]["CLAUDE_CODE_TODO_REMINDER_MODE"] == "off"
     assert observed["env"]["AUTH_TOKEN"] == ""
     assert observed["env"]["CCM_INTERNAL_SERVICE_TOKEN"] == ""
     assert im.get_config_dir(inst.id) == str(config_dir)
@@ -7235,6 +7369,10 @@ async def test_admin_claude_unrestricted_direct_uses_explicit_allow_profile_and_
         "mcp__ccm_ssh__read_file",
     } <= allowed_rules
     assert exec_mock.await_args.kwargs["env"][CLAUDE_SUBPROCESS_ENV_SCRUB] == "1"
+    assert (
+        exec_mock.await_args.kwargs["env"]["CLAUDE_CODE_TODO_REMINDER_MODE"]
+        == "off"
+    )
     config_path = Path(argv[argv.index("--mcp-config") + 1])
     try:
         config = json.loads(config_path.read_text())
