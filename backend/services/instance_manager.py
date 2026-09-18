@@ -14406,7 +14406,13 @@ class InstanceManager:
                                     task_id,
                                 )
                             else:
+                                notice = await self._stage_context_retry_notice(
+                                    db,
+                                    permit,
+                                    provider=provider,
+                                )
                                 await db.commit()
+                                await self._publish_context_retry_notice(notice)
                                 current_message = (
                                     params.get("current_message")
                                     or params.get("prompt")
@@ -15281,6 +15287,80 @@ class InstanceManager:
             ),
         ]
 
+    async def _stage_context_retry_notice(
+        self,
+        db: AsyncSession,
+        permit: _ContextPreflightPermit,
+        *,
+        provider: str,
+    ) -> LogEntry:
+        """Persist the user-visible handoff from overflow to fresh retry."""
+
+        reason = (
+            "context_window_exceeded"
+            if provider == "codex"
+            else "prompt_too_long"
+        )
+        provider_label = (
+            "Codex context window"
+            if provider == "codex"
+            else "Claude Prompt is too long"
+        )
+        content = (
+            f"检测到 {provider_label}；CCM 已保存结构化工作状态快照并压缩对话，"
+            "正在用新会话自动重试本轮消息。无需再次发送或停止会话。"
+        )
+        notice = LogEntry(
+            instance_id=permit.instance_id,
+            task_id=permit.task_id,
+            task_retry_count=permit.retry_count,
+            task_turn_generation=permit.turn_generation,
+            turn_scope="foreground",
+            event_type="system_event",
+            role="system",
+            content=content,
+            raw_json=json.dumps(
+                {
+                    "type": "ccm.context_compaction",
+                    "reason": reason,
+                    "recovery": "fresh_session_retry",
+                },
+                separators=(",", ":"),
+            ),
+            is_error=False,
+        )
+        db.add(notice)
+        await db.flush()
+        return notice
+
+    async def _publish_context_retry_notice(self, notice: LogEntry) -> None:
+        payload = {
+            "id": notice.id,
+            "instance_id": notice.instance_id,
+            "task_id": notice.task_id,
+            "task_retry_count": notice.task_retry_count,
+            "task_turn_generation": notice.task_turn_generation,
+            "turn_scope": notice.turn_scope,
+            "event_type": notice.event_type,
+            "role": notice.role,
+            "content": notice.content,
+            "is_error": notice.is_error,
+            "timestamp": (
+                notice.timestamp or datetime.utcnow()
+            ).isoformat(),
+        }
+        try:
+            await self.broadcaster.broadcast(
+                f"task:{notice.task_id}",
+                payload,
+            )
+        except Exception:
+            logger.warning(
+                "Context retry notice broadcast failed for task %s",
+                notice.task_id,
+                exc_info=True,
+            )
+
     async def _chat_structured_context_preflight_rejection(
         self,
         task_id: int,
@@ -15754,7 +15834,13 @@ class InstanceManager:
                         task_id,
                     )
                     return False
+                notice = await self._stage_context_retry_notice(
+                    db,
+                    permit,
+                    provider=str(params.get("provider") or "claude").lower(),
+                )
                 await db.commit()
+                await self._publish_context_retry_notice(notice)
 
             current_message = (
                 params.get("current_message")

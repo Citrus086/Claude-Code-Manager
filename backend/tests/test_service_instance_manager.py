@@ -23756,6 +23756,27 @@ async def test_claude_prompt_too_long_compacts_and_requeues(db_factory):
         current = await db.get(Task, task_id)
         assert current.session_id is None
         assert current.context_window_usage is None
+        notices = (
+            await db.execute(
+                select(LogEntry).where(
+                    LogEntry.task_id == task_id,
+                    LogEntry.event_type == "system_event",
+                    LogEntry.content.contains("正在用新会话自动重试"),
+                )
+            )
+        ).scalars().all()
+        assert len(notices) == 1
+        assert notices[0].task_turn_generation == 2
+        assert json.loads(notices[0].raw_json) == {
+            "type": "ccm.context_compaction",
+            "reason": "prompt_too_long",
+            "recovery": "fresh_session_retry",
+        }
+    assert any(
+        call.args[0] == f"task:{task_id}"
+        and "正在用新会话自动重试" in call.args[1].get("content", "")
+        for call in manager.broadcaster.broadcast.await_args_list
+    )
 
 
 @pytest.mark.asyncio
@@ -23916,6 +23937,23 @@ async def test_claude_pty_context_error_turn_duration_compacts_and_requeues(
         current = await db.get(Task, task_id)
         assert current.session_id is None
         assert current.context_window_usage is None
+        notices = (
+            await db.execute(
+                select(LogEntry).where(
+                    LogEntry.task_id == task_id,
+                    LogEntry.event_type == "system_event",
+                    LogEntry.content.contains("正在用新会话自动重试"),
+                )
+            )
+        ).scalars().all()
+        assert len(notices) == 1
+        assert notices[0].task_turn_generation == 10
+        assert json.loads(notices[0].raw_json)["reason"] == "prompt_too_long"
+    assert any(
+        call.args[0] == f"task:{task_id}"
+        and "正在用新会话自动重试" in call.args[1].get("content", "")
+        for call in manager.broadcaster.broadcast.await_args_list
+    )
 
 
 @pytest.mark.asyncio
