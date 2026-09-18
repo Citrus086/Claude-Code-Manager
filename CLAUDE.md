@@ -206,13 +206,15 @@ claude-manager/
 
 - **PTY 事件类型兼容**: `claude_pty.events.PTYEvent.to_dict()` 会保留 str-backed `EventType` 枚举；分类事件时可直接与 wire 值比较，或显式读取 `.value`，禁止先调用 `str()`（会得到 `EventType.MESSAGE` 等名称并漏判结构化 API 错误/工具事件）。
 
+- **PTY 前台回合对齐**: 当前 prompt 的普通 user echo 或内容精确匹配的 `queue-operation remove` 才能建立 foreground turn；边界前事件保持 orphan，其他 queue operation 不得认领。显式中断后 Claude 可能只写精确的 `[Request interrupted by user]` user row 而不写 `turn_duration`，仅当它属于该 exact process/active turn 时才可作为终态。
+
 - **PTY 前台活动提示**: Claude interactive JSONL 只提供完整事件；前台长回合通过 generation-bound、仅 WebSocket 的 `provider_activity` 投影 PTY drain 时间戳，禁止持久化或转发终端正文，也不能把该心跳当作模型进展/终态证据。Worker relay 必须按 exact retry/turn 过滤，观察器随 exact consumer、替换或 shutdown 收口。
 
 - **PTY 上下文失败恢复**: Claude/Codex 只有 exact retry/generation 的结构化上下文错误，以及 Claude PTY 的精确 response idle timeout，才能触发恢复。失败的 resident Session 必须按对象 identity 停止并从 SessionPool 取消发布；清除 `Task.session_id` 前必须把关键工具/结果、文件与 Git、附件、阶段结论和子 Agent 状态写入隐藏的结构化上下文快照，并与 exact session CAS 在同一事务提交。timeout 后旧 session 只作快照来源，下一条显式用户消息必须跳过 clone/native resume，以“近期对话 + 持久化工作状态快照 + 当前消息”启动新 session；快照失败须保留旧 session 标识和原队列消息并 fail closed。API 错误携带的全零 usage 不得覆盖最后一次有效上下文计量。
 
 - **Claude 无进展恢复**: 同一前台回合仅在连续相似的 `stop_reason=null` 回复持续至少两分钟、且从未出现 `tool_use/tool_result` 时才可中止并用 generation-bound 一次性许可在新 session 自动重放原消息；自动恢复最多一次，恢复回合再次异常或存在任何工具行为必须停止并等待用户重试，禁止盲目重放。
 
-- **Claude 空提醒污染防护**: Task Claude 的 direct/PTY 启动都必须固定 `CLAUDE_CODE_TODO_REMINDER_MODE=off`，避免 CLI 把空 `task_reminder` 注入模型上下文。若 exact generation 的权威用户消息非空而 assistant 仍在同一回合重复声称收到空请求，输出消费者必须中止并隔离旧 Session；含工具行为的回合绝不自动重放，下一条显式用户消息只能在结构化快照成功后 fresh-start，恢复摘要和继承快照必须过滤该类污染文本。
+- **Claude 空提醒污染防护**: Task Claude 的 direct/PTY 启动都必须固定 `CLAUDE_CODE_TODO_REMINDER_MODE=off`，避免 CLI 把空 `task_reminder` 注入模型上下文。若 exact generation 的权威用户消息非空而 assistant 仍声称收到空请求，普通任务首次命中即中止，只有用户正在讨论“空消息”时要求连续两次确认以防误判；污染 Session 必须从 PTY pool 撤销并停止。含工具行为的回合绝不自动重放，下一条显式用户消息只能在结构化快照成功后 fresh-start，恢复摘要和继承快照必须过滤该类污染文本。
 
 - **数据库更新快照**: 数据库回滚快照只在权威 Alembic revision 检查确认有待迁移项时生成，并且只能由停服后的外部 worker 一次性生成、目标完整性检查和 fsync；禁止先做在线全量快照再被停服快照覆盖的双重 I/O。默认只保留当前和上一个恢复点。
 

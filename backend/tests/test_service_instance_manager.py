@@ -338,6 +338,45 @@ def test_claude_no_progress_state_disables_detection_after_tool_activity():
     assert not state.triggered
 
 
+def test_empty_request_claim_quarantines_ordinary_turn_on_first_claim():
+    state = _ClaudeNoProgressState()
+    event = {
+        "event_type": "message",
+        "role": "assistant",
+        "content": "我看到空消息。让我继续推进证明。",
+    }
+
+    assert state.observe_empty_request_claim(
+        event,
+        authoritative_user_text="继续完成形式化证明",
+    )
+    assert state.empty_request_claims == 1
+    assert state.empty_request_triggered is True
+
+
+def test_empty_request_discussion_requires_two_claims():
+    state = _ClaudeNoProgressState()
+
+    assert not state.observe_empty_request_claim(
+        {
+            "event_type": "message",
+            "role": "assistant",
+            "content": "我看到空消息。让我检查原因。",
+        },
+        authoritative_user_text="为什么系统一直显示空消息",
+    )
+    assert state.observe_empty_request_claim(
+        {
+            "event_type": "message",
+            "role": "assistant",
+            "content": "我收到了一个空请求。让我继续。",
+        },
+        authoritative_user_text="为什么系统一直显示空消息",
+    )
+    assert state.empty_request_claims == 2
+    assert state.empty_request_triggered is True
+
+
 @pytest.mark.asyncio
 async def test_no_progress_failure_queues_one_fresh_session_recovery(db_factory):
     started_at = datetime.utcnow()
@@ -690,7 +729,10 @@ async def test_process_event_quarantines_toolful_empty_request_hallucination(
     manager._tasks[instance_id] = consumer
     manager._consumer_records[instance_id] = record
     manager._launch_params[instance_id] = {
-        "current_message": "继续完成形式化证明",
+        # A user who is explicitly discussing an empty-message issue gets a
+        # second-claim confirmation threshold to avoid classifying a direct
+        # answer about their report as a protocol anomaly.
+        "current_message": "为什么系统显示空消息",
         "source_log_id": 1,
         "no_progress_retry_attempt": 0,
     }
@@ -719,6 +761,7 @@ async def test_process_event_quarantines_toolful_empty_request_hallucination(
         task_id,
         assistant_event("我看到你发送了空消息。让我先检查文件。"),
     )
+    session.send_interrupt.assert_not_awaited()
     await manager._process_event(
         instance_id,
         task_id,
@@ -740,6 +783,7 @@ async def test_process_event_quarantines_toolful_empty_request_hallucination(
             "is_error": False,
         },
     )
+    session.send_interrupt.assert_not_awaited()
     await manager._process_event(
         instance_id,
         task_id,

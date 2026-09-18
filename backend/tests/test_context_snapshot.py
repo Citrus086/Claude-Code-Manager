@@ -64,7 +64,7 @@ async def test_snapshot_filters_empty_request_pollution_from_current_and_prior_s
                 task_id=task.id,
                 event_type="message",
                 role="assistant",
-                content="我看到你发送了空消息。让我继续。",
+                content="我看到空消息。让我继续。",
                 is_error=False,
             )
         )
@@ -92,9 +92,9 @@ async def test_snapshot_filters_empty_request_pollution_from_current_and_prior_s
 
     serialized = json.dumps(payload["state"], ensure_ascii=False)
     assert polluted not in rendered
-    assert "我看到你发送了空消息" not in rendered
+    assert "我看到空消息" not in rendered
     assert polluted not in serialized
-    assert "我看到你发送了空消息" not in serialized
+    assert "我看到空消息" not in serialized
     assert "Keep this conclusion" in rendered
 
 

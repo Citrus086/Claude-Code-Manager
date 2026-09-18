@@ -35,16 +35,20 @@ CLAUDE_EMPTY_REQUEST_ANOMALY_ERROR = (
 )
 _CLAUDE_EMPTY_REQUEST_CLAIM_RES = (
     re.compile(
-        r"^(?:我(?:看到|理解(?:到)?)(?:你)?(?:在)?(?:持续|反复|一直)?(?:地)?"
+        r"^(?:我(?:看到|收到(?:了)?|检测到)(?:一个|一条)?空(?:请求|消息)|"
+        r"我(?:看到|理解(?:到)?)(?:你)?(?:在)?(?:持续|反复|一直)?(?:地)?"
         r"发送(?:了)?(?:一个|一条)?空(?:请求|消息)|"
         r"你(?:刚才)?发送(?:了)?(?:一个|一条)?空(?:请求|消息))"
     ),
     re.compile(
-        r"^(?:i (?:see|understand)(?: that)? you(?:'re| are)? "
+        r"^(?:"
+        r"i (?:see|received|got|detected) (?:an? )?empty "
+        r"(?:requests?|messages?|prompts?)\b|"
+        r"(?:i (?:see|understand)(?: that)? you(?:'re| are)? "
         r"(?:keep |continue(?: to)? |repeatedly )?(?:sent|send|sending)|"
         r"it (?:looks|seems) like you (?:sent|submitted)|"
         r"you (?:just )?(?:sent|submitted)) (?:an? )?empty "
-        r"(?:requests?|messages?|prompts?)\b",
+        r"(?:requests?|messages?|prompts?)\b)",
         re.IGNORECASE,
     ),
 )
@@ -160,6 +164,21 @@ def is_claude_empty_request_claim(value: Any) -> bool:
         return False
     candidate = value.strip().lstrip("#>*_- ")[:320]
     return any(pattern.search(candidate) for pattern in _CLAUDE_EMPTY_REQUEST_CLAIM_RES)
+
+
+def user_text_discusses_empty_request(value: Any) -> bool:
+    """Whether the explicit user text itself asks about empty input."""
+
+    if not isinstance(value, str):
+        return False
+    return bool(
+        re.search(r"空(?:请求|消息)", value)
+        or re.search(
+            r"\bempty (?:requests?|messages?|prompts?)\b",
+            value,
+            re.IGNORECASE,
+        )
+    )
 
 
 async def recoverable_chat_context_failure(db: Any, task: Any) -> str | None:

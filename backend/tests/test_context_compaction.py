@@ -18,6 +18,7 @@ from backend.services.context_compaction import (
     is_upstream_http_400_context_error,
     read_codex_rollout_last_usage,
     recoverable_chat_context_failure,
+    user_text_discusses_empty_request,
 )
 
 
@@ -25,8 +26,11 @@ from backend.services.context_compaction import (
     "content",
     [
         "我看到你发送了空消息。",
+        "我看到空消息。",
+        "我收到了一个空请求。",
         "我理解你持续发送空请求的意图。",
         "You just sent an empty message.",
+        "I see an empty message.",
         "I understand that you keep sending empty requests.",
     ],
 )
@@ -47,6 +51,18 @@ def test_claude_empty_request_claim_classifier_accepts_narrow_leading_claims(
 )
 def test_claude_empty_request_claim_classifier_rejects_discussion(content):
     assert not is_claude_empty_request_claim(content)
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ("为什么会显示空消息？", True),
+        ("Investigate the empty request warning", True),
+        ("继续完成形式化证明", False),
+    ],
+)
+def test_user_text_discusses_empty_request(content, expected):
+    assert user_text_discusses_empty_request(content) is expected
 
 
 def test_compacted_prompt_makes_recent_information_authoritative():

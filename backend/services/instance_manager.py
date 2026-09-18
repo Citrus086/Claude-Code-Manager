@@ -37,6 +37,7 @@ from backend.services.context_compaction import (
     is_claude_empty_request_claim,
     is_upstream_http_400_context_error,
     read_codex_rollout_last_usage,
+    user_text_discusses_empty_request,
 )
 from backend.services.cancellation import (
     await_task_completion,
@@ -947,7 +948,7 @@ class _ClaudeNoProgressState:
         *,
         authoritative_user_text: object,
     ) -> bool:
-        """Detect repeated false empty-input claims without replay authority."""
+        """Detect false empty-input claims without granting replay authority."""
 
         if self.empty_request_triggered:
             return False
@@ -960,7 +961,12 @@ class _ClaudeNoProgressState:
         ):
             return False
         self.empty_request_claims += 1
-        if self.empty_request_claims < 2:
+        required_claims = (
+            2
+            if user_text_discusses_empty_request(authoritative_user_text)
+            else 1
+        )
+        if self.empty_request_claims < required_claims:
             return False
         self.empty_request_triggered = True
         return True
