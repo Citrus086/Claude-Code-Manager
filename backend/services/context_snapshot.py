@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.models.log_entry import LogEntry
 from backend.models.sub_agent import SubAgentSession
 from backend.models.task import Task
+from backend.services.context_compaction import is_claude_empty_request_claim
 
 
 CONTEXT_SNAPSHOT_EVENT_TYPE = "context_snapshot"
@@ -571,7 +572,7 @@ async def capture_context_recovery_snapshot(
                 current_conclusions.append(stage_final)
                 stage_final = None
             continue
-        if row.content:
+        if row.content and not is_claude_empty_request_claim(row.content):
             # Multiple assistant text events can be emitted in one stage.
             # Preserve only its final durable conclusion, not progress chatter.
             stage_final = {
@@ -647,6 +648,14 @@ async def capture_context_recovery_snapshot(
     ]
 
     previous_task = previous.get("task") if isinstance(previous.get("task"), dict) else {}
+    previous_conclusions = [
+        item
+        for item in (previous.get("stage_conclusions") or ())
+        if not (
+            isinstance(item, Mapping)
+            and is_claude_empty_request_claim(item.get("text"))
+        )
+    ]
     task_state = {
         **previous_task,
         "task_id": task.id,
@@ -669,7 +678,7 @@ async def capture_context_recovery_snapshot(
     state = {
         "task": task_state,
         "stage_conclusions": _merge_recent(
-            previous.get("stage_conclusions") or (),
+            previous_conclusions,
             current_conclusions,
             limit=12,
         ),

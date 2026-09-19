@@ -3417,6 +3417,8 @@ export const api = {
   },
   getPRMonitorRun: (runId: number) =>
     request<PRMonitorRun>(`/api/pr-monitor/runs/${runId}`),
+  checkPRMonitorHead: (runId: number) =>
+    request<PRMonitorRun>(`/api/pr-monitor/runs/${runId}/check-head`, { method: 'POST' }),
   bindPRMonitorDeveloper: (runId: number, taskId: number) =>
     request<PRMonitorRun>(`/api/pr-monitor/runs/${runId}/bind-developer`, { method: 'POST', body: JSON.stringify({ task_id: taskId }) }),
   pausePRMonitorRun: (runId: number) =>

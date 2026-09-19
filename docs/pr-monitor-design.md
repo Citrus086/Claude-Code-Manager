@@ -162,7 +162,8 @@ required CI；普通 PR Monitor 的 single/panel 继续使用 repo 级开关。
 ### 2.1 Agent 不轮询，Controller 持久等待
 
 等待 CI、Review、新 push 或 merge action 时不保持模型进程和 Instance。Webhook 提供低延迟提示，
-Reconciler 修复漏 webhook、乱序、重启和临时 GitHub API 失败。
+Reconciler 修复漏 webhook、乱序、重启和临时 GitHub API 失败；UI 也可通过
+`check-head` 对单个 Run 立即触发同一对账。
 
 ### 2.2 Reviewer 与 Developer 是不同身份
 
@@ -861,6 +862,7 @@ POST /api/pr-monitor/runs/{id}/bind-developer
 POST /api/pr-monitor/runs/{id}/unbind-developer
 POST /api/pr-monitor/runs/{id}/pause
 POST /api/pr-monitor/runs/{id}/resume
+POST /api/pr-monitor/runs/{id}/check-head  # 立即对账最新 head，补偿漏掉的 synchronize webhook
 POST /api/pr-monitor/runs/{id}/merge
 POST /api/pr-monitor/runs/{id}/enqueue-merge  # 兼容旧客户端，实际也是 direct merge
 ```

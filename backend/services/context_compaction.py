@@ -29,6 +29,30 @@ _UPSTREAM_HTTP_400_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 
+CLAUDE_EMPTY_REQUEST_ANOMALY_REASON = "empty_request_hallucination"
+CLAUDE_EMPTY_REQUEST_ANOMALY_ERROR = (
+    "Claude session protocol anomaly: repeated empty-request hallucination"
+)
+_CLAUDE_EMPTY_REQUEST_CLAIM_RES = (
+    re.compile(
+        r"^(?:我(?:看到|收到(?:了)?|检测到)(?:一个|一条)?空(?:请求|消息)|"
+        r"我(?:看到|理解(?:到)?)(?:你)?(?:在)?(?:持续|反复|一直)?(?:地)?"
+        r"发送(?:了)?(?:一个|一条)?空(?:请求|消息)|"
+        r"你(?:刚才)?发送(?:了)?(?:一个|一条)?空(?:请求|消息))"
+    ),
+    re.compile(
+        r"^(?:"
+        r"i (?:see|received|got|detected) (?:an? )?empty "
+        r"(?:requests?|messages?|prompts?)\b|"
+        r"(?:i (?:see|understand)(?: that)? you(?:'re| are)? "
+        r"(?:keep |continue(?: to)? |repeatedly )?(?:sent|send|sending)|"
+        r"it (?:looks|seems) like you (?:sent|submitted)|"
+        r"you (?:just )?(?:sent|submitted)) (?:an? )?empty "
+        r"(?:requests?|messages?|prompts?)\b)",
+        re.IGNORECASE,
+    ),
+)
+
 # A completed-turn usage event is necessarily stale by the time the next
 # agentic turn starts.  Keep enough room for the next user input, provider
 # instructions, reasoning, and a substantial tool result even when an admin
@@ -133,8 +157,32 @@ def is_upstream_http_400_context_error(value: Any) -> bool:
     )
 
 
+def is_claude_empty_request_claim(value: Any) -> bool:
+    """Match only Claude's leading claim that a nonempty turn was empty."""
+
+    if not isinstance(value, str):
+        return False
+    candidate = value.strip().lstrip("#>*_- ")[:320]
+    return any(pattern.search(candidate) for pattern in _CLAUDE_EMPTY_REQUEST_CLAIM_RES)
+
+
+def user_text_discusses_empty_request(value: Any) -> bool:
+    """Whether the explicit user text itself asks about empty input."""
+
+    if not isinstance(value, str):
+        return False
+    return bool(
+        re.search(r"空(?:请求|消息)", value)
+        or re.search(
+            r"\bempty (?:requests?|messages?|prompts?)\b",
+            value,
+            re.IGNORECASE,
+        )
+    )
+
+
 async def recoverable_chat_context_failure(db: Any, task: Any) -> str | None:
-    """Return a strict context-failure proof for an exact failed chat turn.
+    """Return a strict fresh-session proof for an exact failed chat turn.
 
     A failed Task may still have a resumable native session on disk.  Only
     provider envelopes (or CCM's exact PTY idle-timeout marker) authorize
@@ -248,6 +296,17 @@ async def recoverable_chat_context_failure(db: Any, task: Any) -> str | None:
                 and _is_response_timeout_marker(content)
             ):
                 candidate = "response_timeout"
+            if (
+                row.event_type == "system_event"
+                and row.role == "system"
+                and row.is_error is True
+                and isinstance(raw, dict)
+                and raw.get("type") == "ccm.turn.failed"
+                and raw.get("version") == 1
+                and raw.get("provider") == "claude"
+                and raw.get("reason") == CLAUDE_EMPTY_REQUEST_ANOMALY_REASON
+            ):
+                candidate = CLAUDE_EMPTY_REQUEST_ANOMALY_REASON
         elif provider == "codex":
             error = raw.get("error") if isinstance(raw, dict) else None
             if (
@@ -291,6 +350,17 @@ async def recoverable_chat_context_failure(db: Any, task: Any) -> str | None:
         # generation-fenced and transactional.  Retain recovery when the PTY
         # timeout event itself could not be persisted.
         return "response_timeout"
+    if (
+        provider == "claude"
+        and not saw_context_failure_marker
+        and str(getattr(task, "error_message", None) or "").startswith(
+            CLAUDE_EMPTY_REQUEST_ANOMALY_ERROR
+        )
+    ):
+        # This exact error is generated only by CCM's generation-bound output
+        # consumer. Preserve recovery even if its visible marker could not be
+        # persisted before the interrupted PTY turn settled.
+        return CLAUDE_EMPTY_REQUEST_ANOMALY_REASON
     return None
 
 

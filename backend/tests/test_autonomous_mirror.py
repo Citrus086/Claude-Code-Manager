@@ -40,6 +40,9 @@ from backend.services.task_events import (
     build_pty_terminal_publication_payload,
     parse_pty_terminal_publication_payload,
 )
+from backend.services.context_compaction import (
+    CLAUDE_EMPTY_REQUEST_ANOMALY_ERROR,
+)
 
 
 async def _make_inst_task(db_factory):
@@ -6189,22 +6192,31 @@ class TestFullMirrorBackend:
             assert effective_task_effort(task, "max") == "high"
             assert task.effort_level == "max"
 
-    async def test_pty_timeout_event_fails_turn_even_when_event_persistence_fails(
-        self, db_factory
+    @pytest.mark.parametrize(
+        "failure_text",
+        [
+            "Response timed out after 900.0s",
+            (
+                f"{CLAUDE_EMPTY_REQUEST_ANOMALY_ERROR}; "
+                "the authoritative user message was nonempty"
+            ),
+        ],
+        ids=["response-timeout", "empty-request-anomaly"],
+    )
+    async def test_pty_poisoned_session_is_retired_when_event_persistence_fails(
+        self, db_factory, failure_text
     ):
-        """A persistent PTY timeout must never become a completed Task.
+        """A poisoned PTY failure must never leave a reusable Session.
 
         Event persistence and terminal classification are deliberately
         separate.  This reproduces the production task-322 boundary where
-        the timeout log existed but the reusable Claude process still yielded
-        an OS-level zero exit.
+        a reusable Claude process still yielded an OS-level zero exit.
         """
 
         im, _ = _make_im(db_factory)
         backend = self._bare_backend(im)
         instance_id, task_id = await _make_inst_task(db_factory)
         started_at = datetime.utcnow()
-        timeout_text = "Response timed out after 900.0s"
 
         async with db_factory() as db:
             task = await db.get(Task, task_id)
@@ -6265,17 +6277,26 @@ class TestFullMirrorBackend:
             im._process_event = AsyncMock(
                 side_effect=RuntimeError("simulated persistence failure")
             )
-            await backend.on_event(
-                instance_id,
-                {
-                    "event_type": "system_event",
-                    "role": None,
-                    "content": timeout_text,
-                    "is_error": True,
-                },
-                task_id=task_id,
-            )
-            assert record.fatal_provider_error == timeout_text
+            if failure_text.startswith(CLAUDE_EMPTY_REQUEST_ANOMALY_ERROR):
+                # The generation-bound InstanceManager detector records this
+                # fatal error before asking the PTY Session to interrupt.
+                object.__setattr__(
+                    record,
+                    "fatal_provider_error",
+                    failure_text,
+                )
+            else:
+                await backend.on_event(
+                    instance_id,
+                    {
+                        "event_type": "system_event",
+                        "role": None,
+                        "content": failure_text,
+                        "is_error": True,
+                    },
+                    task_id=task_id,
+                )
+            assert record.fatal_provider_error == failure_text
             await backend.on_exit(
                 instance_id,
                 0,
@@ -6290,7 +6311,7 @@ class TestFullMirrorBackend:
             task = await db.get(Task, task_id)
             inst = await db.get(Instance, instance_id)
             assert task.status == "failed"
-            assert task.error_message == timeout_text
+            assert task.error_message == failure_text
             assert task.session_id == "stalled-native-session"
             assert inst.status == "error"
         assert proxy.returncode == 1

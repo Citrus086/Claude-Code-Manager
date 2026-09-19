@@ -806,6 +806,11 @@ function RepoDetail({
 
   const shouldPollReviews = reviews.some(isActiveReview)
     || Boolean(selectedReview && isActiveReview(selectedReview))
+    // The Review and its parent Run finalize in separate durable writes. Keep
+    // polling during that short reconciliation window so a passed/commented
+    // review cannot leave the UI stuck on a stale "reviewing" Run with no
+    // Merge PR action visible.
+    || Boolean(monitorRun && ACTIVE_REVIEW_STATUSES.has(monitorRun.status))
     || Boolean(monitorRun?.merge_actions?.some((action) => STARTED_MERGE_STATUSES.has(action.status)));
   const prMonitorWs = useWebSocket(
     ['pr-monitor'],
@@ -891,6 +896,18 @@ function RepoDetail({
       const updatedRun = await operation();
       if (stillCurrent() && updatedRun.id === sourceRunId) {
         setMonitorRun(updatedRun);
+        if (action === 'check-head') {
+          // A successful check may have admitted a new immutable review
+          // attempt. Move the detail pane to that exact head instead of
+          // leaving the old commented Review selected beside the new Run.
+          void loadReviews();
+          if (
+            updatedRun.current_review_id != null
+            && updatedRun.current_review_id !== sourceReviewId
+          ) {
+            await openReview(updatedRun.current_review_id);
+          }
+        }
       }
     } catch (error) {
       if (stillCurrent()) setRunActionError(String(error));
@@ -1017,6 +1034,15 @@ function RepoDetail({
     && !activeAdjudication
     && !activeReview
     && !activePublication,
+  );
+  const canCheckLatestHead = Boolean(
+    monitorRun
+    && detail.enabled
+    && !terminalRun
+    && !activeReview
+    && !activeRepair
+    && !activeMerge
+    && !activeAdjudication,
   );
   const developerTaskNumber = Number(developerTaskId);
   const validDeveloperTaskId = Number.isInteger(developerTaskNumber) && developerTaskNumber > 0;
@@ -1482,6 +1508,14 @@ function RepoDetail({
                       </div>
                     )}
                     <div className="flex flex-wrap gap-2">
+                      {canCheckLatestHead && (
+                        <button className="inline-flex items-center gap-1 bg-gray-700 rounded px-2 py-1 disabled:opacity-50"
+                          disabled={runActionPending !== null}
+                          onClick={() => performRunAction('check-head', () => api.checkPRMonitorHead(monitorRun.id))}>
+                          <RefreshCw size={13} className={runActionPending === 'check-head' ? 'animate-spin' : ''} />
+                          {runActionPending === 'check-head' ? 'Checking latest head…' : 'Check latest head'}
+                        </button>
+                      )}
                       {canResume && (
                         <button className="bg-indigo-600 text-white rounded px-2 py-1 disabled:opacity-50"
                           disabled={runActionPending !== null}

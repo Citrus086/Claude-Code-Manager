@@ -7,15 +7,62 @@ import pytest
 from backend.models.log_entry import LogEntry
 from backend.models.task import Task
 from backend.services.context_compaction import (
+    CLAUDE_EMPTY_REQUEST_ANOMALY_ERROR,
+    CLAUDE_EMPTY_REQUEST_ANOMALY_REASON,
     build_compacted_resume_prompt,
     build_compacted_task_retry_prompt,
     context_compact_threshold_with_headroom,
     context_tokens_used,
     is_context_window_exceeded,
+    is_claude_empty_request_claim,
     is_upstream_http_400_context_error,
     read_codex_rollout_last_usage,
     recoverable_chat_context_failure,
+    user_text_discusses_empty_request,
 )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "我看到你发送了空消息。",
+        "我看到空消息。",
+        "我收到了一个空请求。",
+        "我理解你持续发送空请求的意图。",
+        "You just sent an empty message.",
+        "I see an empty message.",
+        "I understand that you keep sending empty requests.",
+    ],
+)
+def test_claude_empty_request_claim_classifier_accepts_narrow_leading_claims(
+    content,
+):
+    assert is_claude_empty_request_claim(content)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "用户问为什么界面显示‘空消息’。",
+        "Investigate the empty request classifier.",
+        "工具结果为空，但用户消息不是空的。",
+        "",
+    ],
+)
+def test_claude_empty_request_claim_classifier_rejects_discussion(content):
+    assert not is_claude_empty_request_claim(content)
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ("为什么会显示空消息？", True),
+        ("Investigate the empty request warning", True),
+        ("继续完成形式化证明", False),
+    ],
+)
+def test_user_text_discusses_empty_request(content, expected):
+    assert user_text_discusses_empty_request(content) is expected
 
 
 def test_compacted_prompt_makes_recent_information_authoritative():
@@ -635,6 +682,59 @@ async def test_recoverable_chat_timeout_survives_event_persistence_failure(
             await recoverable_chat_context_failure(db, task)
             == "response_timeout"
         )
+
+
+@pytest.mark.asyncio
+async def test_recoverable_chat_failure_accepts_empty_request_anomaly_marker(
+    db_factory,
+):
+    task_id = await _failed_task(db_factory)
+    async with db_factory() as db:
+        db.add(
+            LogEntry(
+                task_id=task_id,
+                task_retry_count=2,
+                task_turn_generation=7,
+                turn_scope="foreground",
+                event_type="system_event",
+                role="system",
+                content="Claude session was quarantined",
+                raw_json=json.dumps(
+                    {
+                        "type": "ccm.turn.failed",
+                        "version": 1,
+                        "provider": "claude",
+                        "reason": CLAUDE_EMPTY_REQUEST_ANOMALY_REASON,
+                    }
+                ),
+                is_error=True,
+            )
+        )
+        await db.commit()
+        task = await db.get(Task, task_id)
+        assert (
+            await recoverable_chat_context_failure(db, task)
+            == CLAUDE_EMPTY_REQUEST_ANOMALY_REASON
+        )
+
+
+@pytest.mark.asyncio
+async def test_recoverable_chat_empty_request_fallback_is_exact(db_factory):
+    task_id = await _failed_task(db_factory)
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        task.error_message = (
+            f"{CLAUDE_EMPTY_REQUEST_ANOMALY_ERROR}; authoritative input exists"
+        )
+        await db.commit()
+        assert (
+            await recoverable_chat_context_failure(db, task)
+            == CLAUDE_EMPTY_REQUEST_ANOMALY_REASON
+        )
+
+        task.error_message = "Assistant mentioned an empty request"
+        await db.commit()
+        assert await recoverable_chat_context_failure(db, task) is None
 
 
 @pytest.mark.asyncio
