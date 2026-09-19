@@ -10055,8 +10055,6 @@ class InstanceManager:
         async with self.pty_background_transition(task_id, session_id):
             state = self._pty_background_states.get(key)
             has_handoff = key in self._pty_autonomous_activity_handoffs
-            if state is None and not has_handoff:
-                return True
             if any(
                 owner_key == key and not owner.done()
                 for owner, owner_key in (
@@ -10085,6 +10083,13 @@ class InstanceManager:
                 for _instance_id, session in runtime_sessions
             ):
                 return False
+
+            # The durable/background indexes can disappear while this method
+            # waits for the transition lock.  Only report success after every
+            # independent post-exit proof and runtime-session owner has been
+            # checked; otherwise a live retained Session could race a resume.
+            if state is None and not has_handoff:
+                return True
 
             if state is not None:
                 state.outcome = "superseded"
@@ -16859,8 +16864,10 @@ class InstanceManager:
                     return False
                 if not new_home:
                     logger.info(
-                        "Codex quota switch: current account below 90%% or no "
-                        "usable alternative for task %d",
+                        "Codex quota switch skipped for task %d: no eligible "
+                        "alternative account (current quota was not proven "
+                        "above the threshold, or every alternative was "
+                        "unavailable)",
                         task_id,
                     )
                     return False

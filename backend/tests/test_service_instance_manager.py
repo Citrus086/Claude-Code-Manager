@@ -7009,6 +7009,111 @@ async def test_managed_claude_launch_disables_native_cron(db_factory):
 
 
 @pytest.mark.asyncio
+async def test_managed_claude_pty_resume_disables_native_cron_in_patched_config(
+    db_factory,
+):
+    """The PTY resume/config path carries the same cron kill switch."""
+    async with db_factory() as db:
+        inst = Instance(name="managed-cron-pty-resume")
+        task = Task(
+            title="managed-cron-pty-resume-task",
+            status="executing",
+            provider="claude",
+        )
+        db.add_all([inst, task])
+        await db.flush()
+        inst.current_task_id = task.id
+        task.instance_id = inst.id
+        await db.commit()
+        instance_id, task_id = inst.id, task.id
+
+    observed: dict[str, dict] = {}
+    manager = InstanceManager(db_factory, MagicMock(broadcast=AsyncMock()))
+
+    class Config:
+        claude_binary = "claude"
+        env_overrides = {}
+
+    class FakePTYBackend:
+        _pool = types.SimpleNamespace(_sessions={})
+
+        @staticmethod
+        def build_config(**_kwargs):
+            return Config()
+
+        async def launch_for_ccm(self, **kwargs):
+            config = self.build_config()
+            observed["env"] = dict(config.env_overrides)
+            manager.processes[kwargs["instance_id"]] = _make_mock_process(
+                pid=52_004,
+                returncode=None,
+            )
+            return kwargs["resume_session_id"]
+
+    manager._pty_backend = FakePTYBackend()
+    manager._pty_enabled = True
+    await manager.launch(
+        instance_id=instance_id,
+        task_id=task_id,
+        prompt="continue",
+        cwd="/tmp",
+        provider="claude",
+        resume_session_id="persisted-cron-session",
+        chat_initiated=True,
+    )
+
+    assert observed["env"][CLAUDE_DISABLE_CRON] == "1"
+
+
+@pytest.mark.asyncio
+async def test_unmanaged_claude_pty_config_does_not_inject_native_cron_switch(
+    db_factory,
+):
+    """The provider switch is scoped to CCM-managed task launches."""
+    async with db_factory() as db:
+        inst = Instance(name="unmanaged-cron-pty")
+        db.add(inst)
+        await db.commit()
+        instance_id = inst.id
+
+    observed: dict[str, dict] = {}
+    manager = InstanceManager(db_factory, MagicMock(broadcast=AsyncMock()))
+
+    class Config:
+        claude_binary = "claude"
+        env_overrides = {}
+
+    class FakePTYBackend:
+        _pool = types.SimpleNamespace(_sessions={})
+
+        @staticmethod
+        def build_config(**_kwargs):
+            return Config()
+
+        async def launch_for_ccm(self, **kwargs):
+            config = self.build_config()
+            observed["env"] = dict(config.env_overrides)
+            manager.processes[kwargs["instance_id"]] = _make_mock_process(
+                pid=52_005,
+                returncode=None,
+            )
+            return kwargs["resume_session_id"]
+
+    manager._pty_backend = FakePTYBackend()
+    manager._pty_enabled = True
+    await manager.launch(
+        instance_id=instance_id,
+        prompt="continue",
+        cwd="/tmp",
+        provider="claude",
+        resume_session_id="unmanaged-session",
+        chat_initiated=True,
+    )
+
+    assert CLAUDE_DISABLE_CRON not in observed["env"]
+
+
+@pytest.mark.asyncio
 async def test_launch_with_zero_thinking_budget_omits_env(db_factory):
     """thinking_budget=0 is treated as 'no budget' (CLI default)."""
     async with db_factory() as db:
@@ -20755,6 +20860,10 @@ async def test_launch_delegates_to_pty_backend_for_claude():
     assert calls["disallowed_tools"] == [
         "EnterPlanMode",
         "ExitPlanMode",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "ScheduleWakeup",
     ]
     assert im._launch_params[7]["source_log_id"] == 123
     assert im._launch_params[7]["current_message"] == "do it now"
@@ -20999,6 +21108,55 @@ async def test_reconcile_orphaned_pty_guard_discards_dead_background_state():
     assert state.outcome == "superseded"
     assert manager.pty_background_generation_for(task_id, session_id) is None
     assert not manager.has_pty_autonomous_activity_handoff(task_id, session_id)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_orphaned_pty_guard_keeps_live_post_exit_proof_without_indexes():
+    task_id = 904
+    session_id = "retained-proof-session"
+    manager = InstanceManager(MagicMock(), types.SimpleNamespace())
+    manager._pty_backend = types.SimpleNamespace(
+        _sessions={},
+        _pool=types.SimpleNamespace(_sessions={}),
+    )
+    proof = types.SimpleNamespace(
+        session=types.SimpleNamespace(session_id=session_id, is_alive=True),
+        invalidated=False,
+        watcher=None,
+    )
+    key = (task_id, session_id)
+    manager._pty_post_exit_generations[key] = proof
+
+    assert not await manager.reconcile_orphaned_pty_runtime_guard(
+        task_id,
+        session_id,
+    )
+    assert manager._pty_post_exit_generations[key] is proof
+
+
+@pytest.mark.asyncio
+async def test_reconcile_orphaned_pty_guard_keeps_live_runtime_session_without_indexes():
+    task_id = 905
+    session_id = "runtime-owner-session"
+    manager = InstanceManager(MagicMock(), types.SimpleNamespace())
+    class LiveSession:
+        __hash__ = object.__hash__
+
+        def __init__(self):
+            self.session_id = session_id
+            self.is_alive = True
+
+    session = LiveSession()
+    manager._pty_backend = types.SimpleNamespace(
+        _sessions={},
+        _pool=types.SimpleNamespace(_sessions={}),
+    )
+    manager._task_runtime_scope_pty_owners[session] = task_id
+
+    assert not await manager.reconcile_orphaned_pty_runtime_guard(
+        task_id,
+        session_id,
+    )
 
 
 @pytest.mark.asyncio

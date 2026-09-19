@@ -5850,6 +5850,11 @@ class GlobalDispatcher:
                         # Bind this lifecycle to its exact Task so a later Plan
                         # on the same slot cannot block the old Task's chat.
                         setattr(lifecycle, "_ccm_task_id", task.id)
+                        setattr(
+                            lifecycle,
+                            "_ccm_task_generation",
+                            self._task_lifecycle_generation(task),
+                        )
                         self._running_tasks[reserved_instance_id] = lifecycle
                         self._prefer_plan_runs = True
                         lifecycle_registered = True
@@ -22959,7 +22964,13 @@ Codex 中工具会显示为上述 mcp__ccm_monitor_agent__* canonical 名称；
             )
             terminal_ownerless = bool(
                 task.status
-                in {"completed", "failed", "cancelled", "conflict"}
+                in {
+                    "completed",
+                    "failed",
+                    "cancelled",
+                    "conflict",
+                    "superseded",
+                }
                 and (
                     instance_id is None
                     or (
@@ -23045,16 +23056,66 @@ Codex 中工具会显示为上述 mcp__ccm_monitor_agent__* canonical 名称；
                     and instance.pid is None
                     and not manager_running
                 ):
+                    lifecycle_generation = getattr(
+                        lifecycle,
+                        "_ccm_task_generation",
+                        None,
+                    )
+                    if lifecycle_generation is None or (
+                        lifecycle_generation.task_id != task.id
+                        or any(
+                            getattr(lifecycle_generation, field)
+                            != getattr(task, field)
+                            for field in (
+                                "worker_id",
+                                "shared_from_id",
+                                "retry_count",
+                                "turn_generation",
+                                "instance_id",
+                                "started_at",
+                                "completed_at",
+                            )
+                        )
+                    ):
+                        # A lifecycle without an exact immutable generation is
+                        # not provably stale. Keep the task busy until its
+                        # owner can be reconciled by the normal cleanup path.
+                        return True
+
+                    lifecycle.cancel()
+                    operation, cancellation = await _settle_despite_cancellation(
+                        asyncio.wait_for(
+                            asyncio.shield(
+                                asyncio.gather(
+                                    lifecycle,
+                                    return_exceptions=True,
+                                )
+                            ),
+                            timeout=AUX_LIFECYCLE_CANCEL_TIMEOUT,
+                        )
+                    )
+                    try:
+                        operation.result()
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "Stale terminal lifecycle for task %s on instance %s "
+                            "did not stop within %.1fs",
+                            task_id,
+                            instance_id,
+                            AUX_LIFECYCLE_CANCEL_TIMEOUT,
+                        )
+                        return True
+                    if cancellation is not None:
+                        raise cancellation
                     # A lifecycle can remain suspended in terminal cleanup
                     # after its exact process/consumer and reverse owner have
                     # already been released.  It has no remaining execution
                     # authority, so retaining it here would block every later
-                    # chat turn forever.  Detach and cancel only from this
-                    # fully terminal, ownerless, pid-less snapshot; the old
-                    # generation's cleanup writers remain CAS-fenced from a
-                    # replacement turn.
+                    # chat turn forever.  Remove it only after cancellation
+                    # and all lifecycle cleanup have actually completed; the
+                    # old generation's cleanup writers remain CAS-fenced from
+                    # a replacement turn.
                     self._remove_running_task_if_same(instance_id, lifecycle)
-                    lifecycle.cancel()
                     logger.warning(
                         "Reconciled stale terminal lifecycle for task %s on "
                         "instance %s",

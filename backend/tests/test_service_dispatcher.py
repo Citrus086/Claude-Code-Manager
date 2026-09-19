@@ -15459,9 +15459,11 @@ async def test_queued_busy_reconciles_terminal_ownerless_stale_lifecycle(
         task.instance_id = instance.id
         await db.commit()
         task_id, instance_id = task.id, instance.id
+        lifecycle_generation = d._task_lifecycle_generation(task)
 
     lifecycle = asyncio.create_task(asyncio.Event().wait())
     setattr(lifecycle, "_ccm_task_id", task_id)
+    setattr(lifecycle, "_ccm_task_generation", lifecycle_generation)
     d._running_tasks[instance_id] = lifecycle
 
     async with db_factory() as db:
@@ -15470,6 +15472,83 @@ async def test_queued_busy_reconciles_terminal_ownerless_stale_lifecycle(
     assert d._running_tasks.get(instance_id) is None
     assert lifecycle.cancelling()
     await asyncio.gather(lifecycle, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_queued_busy_keeps_stale_lifecycle_until_cancellation_finishes(
+    db_factory,
+    monkeypatch,
+):
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        task = Task(
+            title="terminal lifecycle cancellation",
+            description="d",
+            status="failed",
+            session_id="cancel-wait-session",
+        )
+        db.add(task)
+        await db.flush()
+        instance = Instance(
+            name="cancel-wait-slot",
+            status="error",
+            pid=None,
+            current_task_id=None,
+        )
+        db.add(instance)
+        await db.flush()
+        task.instance_id = instance.id
+        await db.commit()
+        task_id, instance_id = task.id, instance.id
+        lifecycle_generation = d._task_lifecycle_generation(task)
+
+    cancellation_started = asyncio.Event()
+    release_cancellation = asyncio.Event()
+
+    async def lifecycle_body():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_started.set()
+            await release_cancellation.wait()
+            raise
+
+    lifecycle = asyncio.create_task(lifecycle_body())
+    setattr(lifecycle, "_ccm_task_id", task_id)
+    setattr(lifecycle, "_ccm_task_generation", lifecycle_generation)
+    d._running_tasks[instance_id] = lifecycle
+    monkeypatch.setattr(
+        "backend.services.dispatcher.AUX_LIFECYCLE_CANCEL_TIMEOUT",
+        0.02,
+    )
+
+    async def release_after_observed():
+        await cancellation_started.wait()
+        release_cancellation.set()
+
+    releaser = asyncio.create_task(release_after_observed())
+    try:
+        async with db_factory() as db:
+            check = asyncio.create_task(
+                d._queued_task_has_live_generation(db, task_id)
+            )
+            await asyncio.wait_for(cancellation_started.wait(), timeout=1)
+            await asyncio.sleep(0)
+            assert not check.done()
+            assert d._running_tasks.get(instance_id) is lifecycle
+            release_cancellation.set()
+            assert not await asyncio.wait_for(check, timeout=1)
+        await asyncio.wait_for(releaser, timeout=1)
+        assert lifecycle.done()
+        assert d._running_tasks.get(instance_id) is None
+    finally:
+        if not releaser.done():
+            releaser.cancel()
+            await asyncio.gather(releaser, return_exceptions=True)
+        if not lifecycle.done():
+            release_cancellation.set()
+            lifecycle.cancel()
+            await asyncio.gather(lifecycle, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -15673,8 +15752,10 @@ async def test_queued_busy_reconciles_orphaned_terminal_pty_background_state(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("task_status", ["failed", "superseded"])
 async def test_queued_busy_reconciles_guard_with_retained_dead_instance(
     db_factory,
+    task_status,
 ):
     """A terminal Task may retain its last now-ownerless Instance id."""
 
@@ -15692,7 +15773,7 @@ async def test_queued_busy_reconciles_guard_with_retained_dead_instance(
         task = Task(
             title="timed out PTY retained slot",
             description="d",
-            status="failed",
+            status=task_status,
             session_id="stopped-retained-session",
             instance_id=instance.id,
         )
