@@ -29,6 +29,16 @@ _UPSTREAM_HTTP_400_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_CLAUDE_REQUEST_TOO_LARGE_DETAIL_RE = re.compile(
+    r"^request_too_large:\s*413(?:\s|$)",
+    re.IGNORECASE,
+)
+_CLAUDE_REQUEST_TOO_LARGE_TEXT_RE = re.compile(
+    r"^request too large\s*\(max\s+\d+(?:\.\d+)?\s*mb\)\."
+    r"\s*double press esc to go back and try with a smaller file\.\s*$",
+    re.IGNORECASE,
+)
+
 CLAUDE_EMPTY_REQUEST_ANOMALY_REASON = "empty_request_hallucination"
 CLAUDE_EMPTY_REQUEST_ANOMALY_ERROR = (
     "Claude session protocol anomaly: repeated empty-request hallucination"
@@ -157,6 +167,36 @@ def is_upstream_http_400_context_error(value: Any) -> bool:
     )
 
 
+def is_claude_request_too_large_413(value: Any) -> bool:
+    """Recognize Claude's exact structured 413 context rejection.
+
+    Claude CLI renders the gateway response as a normal assistant error, but
+    preserves the provider envelope in ``raw_json``.  Only that envelope, with
+    zero request usage and the gateway's ``request_too_large: 413`` detail, is
+    safe to replay after compaction.  The rendered text form is accepted only
+    for the PTY cleanup path, which receives the fatal provider message after
+    the raw envelope has already been persisted and validated.
+    """
+
+    if isinstance(value, Mapping):
+        message = value.get("message")
+        usage = message.get("usage") if isinstance(message, Mapping) else None
+        details = value.get("errorDetails")
+        return bool(
+            value.get("type") == "assistant"
+            and value.get("isApiErrorMessage") is True
+            and value.get("error") == "invalid_request"
+            and type(value.get("apiErrorStatus")) is int
+            and value.get("apiErrorStatus") == 413
+            and isinstance(details, str)
+            and _CLAUDE_REQUEST_TOO_LARGE_DETAIL_RE.match(details.strip())
+            and _canonical_zero_usage(usage)
+        )
+    return isinstance(value, str) and bool(
+        _CLAUDE_REQUEST_TOO_LARGE_TEXT_RE.fullmatch(value.strip())
+    )
+
+
 def is_claude_empty_request_claim(value: Any) -> bool:
     """Match only Claude's leading claim that a nonempty turn was empty."""
 
@@ -250,6 +290,14 @@ async def recoverable_chat_context_failure(db: Any, task: Any) -> str | None:
                 and row.role == "assistant"
                 and row.is_error is True
                 and isinstance(raw, dict)
+                and is_claude_request_too_large_413(raw)
+            ):
+                candidate = "prompt_too_long"
+            if (
+                row.event_type == "message"
+                and row.role == "assistant"
+                and row.is_error is True
+                and isinstance(raw, dict)
                 and raw.get("type") == "assistant"
                 and raw.get("isApiErrorMessage") is True
                 and raw.get("error") == "invalid_request"
@@ -284,6 +332,7 @@ async def recoverable_chat_context_failure(db: Any, task: Any) -> str | None:
                 if (
                     "prompt is too long" in result_text.lower()
                     or is_upstream_http_400_context_error(result_text)
+                    or is_claude_request_too_large_413(result_text)
                 ):
                     candidate = "prompt_too_long"
             # The PTY idle timeout is an exact CCM-generated terminal marker;
@@ -428,6 +477,8 @@ def is_context_window_exceeded(provider: str | None, *details: Any) -> bool:
     """Recognize provider text and Codex app-server's structured error code."""
 
     del provider  # Markers are intentionally valid for both supported CLIs.
+    if any(is_claude_request_too_large_413(detail) for detail in details):
+        return True
     text = " ".join(
         fragment.strip().lower()
         for detail in details

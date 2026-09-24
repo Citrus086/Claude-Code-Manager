@@ -24141,20 +24141,31 @@ async def test_claude_prompt_too_long_compacts_and_requeues(db_factory):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "api_error_text",
+    ("api_error_text", "api_error_kind"),
     [
-        "Prompt is too long",
+        ("Prompt is too long", "prompt-too-long"),
         (
-            "API Error: 400 upstream returned HTTP 400 "
-            "(request id: 202609140132318396298608268d9d6Y5npViE4) "
-            "(request id: 20260914013212163478308268d9d690QoKDW9)"
+            (
+                "API Error: 400 upstream returned HTTP 400 "
+                "(request id: 202609140132318396298608268d9d6Y5npViE4) "
+                "(request id: 20260914013212163478308268d9d690QoKDW9)"
+            ),
+            "upstream-http-400",
+        ),
+        (
+            (
+                "Request too large (max 32MB). Double press esc to go back "
+                "and try with a smaller file."
+            ),
+            "request-too-large-413",
         ),
     ],
-    ids=("prompt-too-long", "upstream-http-400"),
+    ids=("prompt-too-long", "upstream-http-400", "request-too-large-413"),
 )
 async def test_claude_pty_context_error_turn_duration_compacts_and_requeues(
     db_factory,
     api_error_text,
+    api_error_kind,
 ):
     """The real claude-pty API-error/turn-duration pair is replay-safe."""
 
@@ -24215,13 +24226,21 @@ async def test_claude_pty_context_error_turn_duration_compacts_and_requeues(
                     "isApiErrorMessage": True,
                     "error": (
                         "invalid_request"
-                        if api_error_text == "Prompt is too long"
+                        if api_error_kind
+                        in {"prompt-too-long", "request-too-large-413"}
                         else "unknown"
                     ),
                     **(
                         {"apiErrorStatus": 400}
-                        if api_error_text != "Prompt is too long"
-                        else {}
+                        if api_error_kind == "upstream-http-400"
+                        else (
+                            {
+                                "apiErrorStatus": 413,
+                                "errorDetails": "request_too_large: 413 <html />",
+                            }
+                            if api_error_kind == "request-too-large-413"
+                            else {}
+                        )
                     ),
                     "message": {
                         "role": "assistant",

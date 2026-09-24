@@ -15,6 +15,7 @@ from backend.services.context_compaction import (
     context_tokens_used,
     is_context_window_exceeded,
     is_claude_empty_request_claim,
+    is_claude_request_too_large_413,
     is_upstream_http_400_context_error,
     read_codex_rollout_last_usage,
     recoverable_chat_context_failure,
@@ -134,6 +135,46 @@ def test_upstream_http_400_context_error_requires_exact_gateway_shape():
     )
     assert not is_upstream_http_400_context_error(
         message + " extra provider details"
+    )
+
+
+def test_claude_request_too_large_413_requires_exact_provider_envelope():
+    raw = {
+        "type": "assistant",
+        "isApiErrorMessage": True,
+        "error": "invalid_request",
+        "apiErrorStatus": 413,
+        "errorDetails": "request_too_large: 413 <html>gateway body</html>",
+        "message": {
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+            }
+        },
+    }
+    rendered = (
+        "Request too large (max 32MB). Double press esc to go back and "
+        "try with a smaller file."
+    )
+
+    assert is_claude_request_too_large_413(raw)
+    assert is_claude_request_too_large_413(rendered)
+    assert is_context_window_exceeded("claude", raw)
+    assert is_context_window_exceeded("claude", rendered)
+
+    wrong_status = dict(raw, apiErrorStatus=400)
+    wrong_detail = dict(raw, errorDetails="request_too_large: 4130")
+    nonzero_usage = dict(
+        raw,
+        message={"usage": {"input_tokens": 1, "output_tokens": 0}},
+    )
+    assert not is_claude_request_too_large_413(wrong_status)
+    assert not is_claude_request_too_large_413(wrong_detail)
+    assert not is_claude_request_too_large_413(nonzero_usage)
+    assert not is_claude_request_too_large_413(
+        "Request too large (max 32MB)"
     )
 
 
@@ -286,6 +327,53 @@ async def test_recoverable_chat_failure_accepts_exact_claude_api_error(
                     is_error=True,
                 ),
             ]
+        )
+        await db.commit()
+        task = await db.get(Task, task_id)
+
+        assert (
+            await recoverable_chat_context_failure(db, task)
+            == "prompt_too_long"
+        )
+
+
+@pytest.mark.asyncio
+async def test_recoverable_chat_failure_accepts_claude_request_too_large_413(
+    db_factory,
+):
+    task_id = await _failed_task(db_factory)
+    async with db_factory() as db:
+        db.add(
+            LogEntry(
+                task_id=task_id,
+                task_retry_count=2,
+                task_turn_generation=7,
+                turn_scope="foreground",
+                event_type="message",
+                role="assistant",
+                content=(
+                    "Request too large (max 32MB). Double press esc to go "
+                    "back and try with a smaller file."
+                ),
+                raw_json=json.dumps(
+                    {
+                        "type": "assistant",
+                        "isApiErrorMessage": True,
+                        "error": "invalid_request",
+                        "apiErrorStatus": 413,
+                        "errorDetails": "request_too_large: 413 <html />",
+                        "message": {
+                            "usage": {
+                                "input_tokens": 0,
+                                "output_tokens": 0,
+                                "cache_creation_input_tokens": 0,
+                                "cache_read_input_tokens": 0,
+                            }
+                        },
+                    }
+                ),
+                is_error=True,
+            )
         )
         await db.commit()
         task = await db.get(Task, task_id)

@@ -35,6 +35,7 @@ from backend.services.context_compaction import (
     CLAUDE_EMPTY_REQUEST_ANOMALY_REASON,
     build_compacted_resume_prompt,
     is_claude_empty_request_claim,
+    is_claude_request_too_large_413,
     is_upstream_http_400_context_error,
     read_codex_rollout_last_usage,
     user_text_discusses_empty_request,
@@ -15659,6 +15660,12 @@ class InstanceManager:
                                 == "prompt is too long"
                                 and usage_is_zero
                             )
+                            is_request_too_large = (
+                                row.role == "assistant"
+                                and row.is_error is True
+                                and isinstance(raw, dict)
+                                and is_claude_request_too_large_413(raw)
+                            )
                             is_upstream_http_400 = (
                                 row.role == "assistant"
                                 and row.is_error is True
@@ -15670,7 +15677,11 @@ class InstanceManager:
                                 )
                                 and usage_is_zero
                             )
-                            if not (is_prompt_too_long or is_upstream_http_400):
+                            if not (
+                                is_prompt_too_long
+                                or is_request_too_large
+                                or is_upstream_http_400
+                            ):
                                 return None
                             seen_api_error = True
                         elif row.event_type in {"system_init", "rate_limit_event"}:
@@ -15743,7 +15754,22 @@ class InstanceManager:
                     and terminal_result.get("duration_api_ms") == 0
                     and usage_is_canonical_zero
                 )
-                if not (is_prompt_result or is_upstream_http_400_result):
+                is_request_too_large_result = (
+                    terminal.event_type == "result"
+                    and terminal.is_error is True
+                    and terminal_result.get("type") == "result"
+                    and terminal_result.get("is_error") is True
+                    and isinstance(terminal_message, str)
+                    and is_claude_request_too_large_413(terminal_message)
+                    and type(terminal_result.get("duration_api_ms")) is int
+                    and terminal_result.get("duration_api_ms") == 0
+                    and usage_is_canonical_zero
+                )
+                if not (
+                    is_prompt_result
+                    or is_request_too_large_result
+                    or is_upstream_http_400_result
+                ):
                     return None
                 for row, raw in zip(rows[:-1], parsed_rows[:-1], strict=True):
                     if row.event_type == "message":
@@ -15757,6 +15783,12 @@ class InstanceManager:
                             and str(row.content or "").strip().lower()
                             == "prompt is too long"
                         )
+                        is_request_too_large_api_error = (
+                            row.role == "assistant"
+                            and row.is_error is True
+                            and isinstance(raw, dict)
+                            and is_claude_request_too_large_413(raw)
+                        )
                         is_upstream_http_400_api_error = (
                             row.role == "assistant"
                             and row.is_error is True
@@ -15768,7 +15800,9 @@ class InstanceManager:
                             )
                         )
                         if not (
-                            is_prompt_api_error or is_upstream_http_400_api_error
+                            is_prompt_api_error
+                            or is_request_too_large_api_error
+                            or is_upstream_http_400_api_error
                         ):
                             return None
                     elif row.event_type in {"system_init", "rate_limit_event"}:
